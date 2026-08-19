@@ -1085,12 +1085,14 @@ name = "focal-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "focal-editor"
 version = "0.1.0"
 dependencies = [
+ "better-plots",
  "eframe",
  "focal-core",
  "image",

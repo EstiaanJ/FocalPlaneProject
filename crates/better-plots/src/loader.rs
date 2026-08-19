@@ -3,15 +3,16 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
 };
 
 use image::{ImageDecoder, ImageFormat, codecs::jpeg::JpegDecoder, metadata::Orientation};
 
-use crate::vectorscope::{
+use better_plots::vectorscope::{
     AnalysisRegion, DensityScale, SCOPE_RESOLUTION, ScopeSpace, VectorscopeAnalysis, analyse,
-    analyse_region_in_space, render_reverse_highlight,
+    analyse_region_in_space, render_reverse_highlight_with_cancellation,
 };
 
 pub struct LoadedImage {
@@ -48,6 +49,7 @@ enum LoadRequest {
         radius: f32,
         space: ScopeSpace,
         density_scale: DensityScale,
+        cancellation: Arc<AtomicBool>,
     },
 }
 
@@ -78,6 +80,7 @@ pub struct ImageLoader {
     requests: Sender<LoadRequest>,
     events: Receiver<LoadEvent>,
     next_id: u64,
+    active_highlight_cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl ImageLoader {
@@ -158,10 +161,12 @@ impl ImageLoader {
             requests: request_sender,
             events: event_receiver,
             next_id: 0,
+            active_highlight_cancellation: None,
         }
     }
 
     pub fn open(&mut self, path: PathBuf) -> u64 {
+        self.cancel_active_highlight();
         self.next_id += 1;
         let id = self.next_id;
         let _ = self.requests.send(LoadRequest::Open { id, path });
@@ -195,8 +200,11 @@ impl ImageLoader {
         space: ScopeSpace,
         density_scale: DensityScale,
     ) -> u64 {
+        self.cancel_active_highlight();
         self.next_id += 1;
         let id = self.next_id;
+        let cancellation = Arc::new(AtomicBool::new(false));
+        self.active_highlight_cancellation = Some(cancellation.clone());
         let _ = self.requests.send(LoadRequest::Highlight {
             id,
             image,
@@ -204,8 +212,20 @@ impl ImageLoader {
             radius,
             space,
             density_scale,
+            cancellation,
         });
         id
+    }
+
+    pub fn cancel_highlight(&mut self) {
+        self.cancel_active_highlight();
+    }
+
+    fn cancel_active_highlight(&mut self) {
+        if let Some(cancellation) = &self.active_highlight_cancellation {
+            cancellation.store(true, Ordering::Release);
+        }
+        self.active_highlight_cancellation = None;
     }
 
     pub fn poll(&self) -> Vec<LoadEvent> {
@@ -245,9 +265,9 @@ fn process_request(request: LoadRequest, event_sender: &Sender<LoadEvent>) -> bo
             radius,
             space,
             density_scale,
-        } => LoadEvent::Highlighted {
-            id,
-            rgba: render_reverse_highlight(
+            cancellation,
+        } => {
+            let Some(rgba) = render_reverse_highlight_with_cancellation(
                 &image.rgba,
                 image.width,
                 image.height,
@@ -255,10 +275,17 @@ fn process_request(request: LoadRequest, event_sender: &Sender<LoadEvent>) -> bo
                 radius,
                 space,
                 density_scale,
-            ),
-            width: image.width,
-            height: image.height,
-        },
+                &cancellation,
+            ) else {
+                return true;
+            };
+            LoadEvent::Highlighted {
+                id,
+                rgba,
+                width: image.width,
+                height: image.height,
+            }
+        }
     };
     event_sender.send(event).is_ok()
 }
@@ -287,7 +314,8 @@ fn load_image(path: &Path) -> Result<LoadedImage, String> {
     let (width, height) = rgba.dimensions();
     let rgba = rgba.into_raw();
     let scope = analyse(&rgba, width, height, SCOPE_RESOLUTION);
-    let cie_scope = crate::vectorscope::analyse_cie1931(&rgba, width, height, SCOPE_RESOLUTION);
+    let cie_scope =
+        better_plots::vectorscope::analyse_cie1931(&rgba, width, height, SCOPE_RESOLUTION);
 
     Ok(LoadedImage {
         path: path.to_owned(),
@@ -368,6 +396,27 @@ mod tests {
 
         assert!(saw_rectangle, "rectangle analysis was dropped");
         assert!(saw_hover, "hover analysis was dropped");
+    }
+
+    #[test]
+    fn cancelled_highlight_does_not_emit_a_stale_result() {
+        let image = tiny_image();
+        let cancellation = Arc::new(AtomicBool::new(true));
+        let (sender, receiver) = mpsc::channel();
+
+        assert!(process_request(
+            LoadRequest::Highlight {
+                id: 1,
+                image,
+                centre: [0.5, 0.5],
+                radius: 0.01,
+                space: ScopeSpace::Ryb,
+                density_scale: DensityScale::Linear,
+                cancellation,
+            },
+            &sender,
+        ));
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

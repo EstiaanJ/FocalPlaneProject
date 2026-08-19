@@ -2,7 +2,6 @@
 
 mod app;
 mod loader;
-mod vectorscope;
 
 use app::BetterPlotsApp;
 

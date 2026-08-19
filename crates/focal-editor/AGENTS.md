@@ -11,6 +11,11 @@ Focal Editor is the standalone desktop editor described in `../../docs/Focal-Edi
 - Save editable state as a versioned JSON sidecar.
 - Export an 8-bit sRGB PNG.
 - Keep the UI responsive with background loading/rendering and latest-request-wins result handling.
+- Match the old editor's high-level layout: Navigator at the upper left, presets below it, histograms at the top of the right rail, controls below the histograms, the photo viewer in the centre, and the filmstrip along the bottom.
+- Keep the old editor's loading/progress treatment in the top bar; the status
+  remains there and the `FOCALPLANE` all-caps title sits at the far right of
+  the same top bar.
+- Make the major rails and subpanels resizable: left/right rail widths, filmstrip height, Navigator height, and histogram-panel height.
 
 The human GUI description currently says not to include the curve control, crop controls, or the old response curve. Do not add those speculatively. FocalPlot scope widgets will be integrated after their GUI-independent analysis is extracted and the outstanding bugs are fixed.
 

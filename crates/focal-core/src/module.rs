@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ColourEncoding, Image, ImageContract, WorkingSpace};
+use crate::{CancellationToken, Image, ImageContract, WorkingSpace};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleKind {
@@ -62,13 +62,21 @@ impl Module {
         }
     }
 
-    pub(crate) fn apply(&self, image: &mut Image, working_space: WorkingSpace) {
+    pub(crate) fn apply(
+        &self,
+        image: &mut Image,
+        working_space: WorkingSpace,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ()> {
         if !self.enabled {
-            return;
+            return Ok(());
         }
         match self.parameters {
             ModuleParameters::InputTransform => {
-                for pixel in image.pixels_mut() {
+                for pixel in image.pixels_mut().iter_mut() {
+                    if cancellation.is_cancelled() {
+                        return Err(());
+                    }
                     for value in pixel {
                         *value = srgb_to_linear(*value);
                     }
@@ -76,7 +84,10 @@ impl Module {
                 image.set_contract(working_space.image_contract());
             }
             ModuleParameters::WhiteBalance { multipliers } => {
-                for pixel in image.pixels_mut() {
+                for pixel in image.pixels_mut().iter_mut() {
+                    if cancellation.is_cancelled() {
+                        return Err(());
+                    }
                     for (value, multiplier) in pixel.iter_mut().zip(multipliers) {
                         *value *= multiplier;
                     }
@@ -84,8 +95,13 @@ impl Module {
             }
             ModuleParameters::Exposure { stops } => {
                 let gain = stops.exp2();
-                for value in image.pixels_mut().iter_mut().flatten() {
-                    *value *= gain;
+                for pixel in image.pixels_mut().iter_mut() {
+                    if cancellation.is_cancelled() {
+                        return Err(());
+                    }
+                    for value in pixel {
+                        *value *= gain;
+                    }
                 }
             }
             ModuleParameters::Contrast { amount } => {
@@ -93,12 +109,20 @@ impl Module {
                 // 18% grey. This is intentionally easy to replace after the
                 // photographic behaviour has been evaluated.
                 let slope = (1.0 + amount.clamp(-100.0, 100.0) / 100.0).max(0.0);
-                for value in image.pixels_mut().iter_mut().flatten() {
-                    *value = 0.18 + (*value - 0.18) * slope;
+                for pixel in image.pixels_mut().iter_mut() {
+                    if cancellation.is_cancelled() {
+                        return Err(());
+                    }
+                    for value in pixel {
+                        *value = 0.18 + (*value - 0.18) * slope;
+                    }
                 }
             }
             ModuleParameters::OutputTransform => {
-                for pixel in image.pixels_mut() {
+                for pixel in image.pixels_mut().iter_mut() {
+                    if cancellation.is_cancelled() {
+                        return Err(());
+                    }
                     for value in pixel {
                         *value = linear_to_srgb(*value);
                     }
@@ -114,23 +138,44 @@ impl Module {
             | ModuleParameters::Resize
             | ModuleParameters::QuantisationAndDither => {}
         }
+        Ok(())
+    }
+
+    #[must_use]
+    pub(crate) const fn is_placeholder(&self) -> bool {
+        matches!(
+            self.parameters,
+            ModuleParameters::OrientationAndCrop
+                | ModuleParameters::HighlightsAndShadows
+                | ModuleParameters::TonalCurve
+                | ModuleParameters::CreativeColour
+                | ModuleParameters::NoiseReduction
+                | ModuleParameters::Sharpening
+                | ModuleParameters::Resize
+                | ModuleParameters::QuantisationAndDither
+        )
     }
 
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         match self.parameters {
             ModuleParameters::WhiteBalance { multipliers } => multipliers
                 .iter()
-                .all(|value| value.is_finite())
+                .all(|value| value.is_finite() && *value >= 0.0)
                 .then_some(())
-                .ok_or("white-balance multipliers must be finite"),
+                .ok_or("white-balance multipliers must be finite and non-negative"),
             ModuleParameters::Exposure { stops } => stops
                 .is_finite()
                 .then_some(())
                 .ok_or("exposure stops must be finite"),
-            ModuleParameters::Contrast { amount } => amount
-                .is_finite()
-                .then_some(())
-                .ok_or("contrast amount must be finite"),
+            ModuleParameters::Contrast { amount } => {
+                if !amount.is_finite() {
+                    Err("contrast amount must be finite")
+                } else if !(-100.0..=100.0).contains(&amount) {
+                    Err("contrast amount must be between -100 and 100")
+                } else {
+                    Ok(())
+                }
+            }
             ModuleParameters::InputTransform
             | ModuleParameters::OrientationAndCrop
             | ModuleParameters::HighlightsAndShadows
@@ -145,9 +190,12 @@ impl Module {
     }
 
     #[must_use]
-    pub(crate) const fn required_encoding(&self) -> Option<ColourEncoding> {
+    pub(crate) const fn required_contract(
+        &self,
+        working_space: WorkingSpace,
+    ) -> Option<ImageContract> {
         match self.parameters {
-            ModuleParameters::InputTransform => Some(ColourEncoding::Srgb),
+            ModuleParameters::InputTransform => Some(ImageContract::SRGB_DISPLAY),
             ModuleParameters::OutputTransform
             | ModuleParameters::WhiteBalance { .. }
             | ModuleParameters::Exposure { .. }
@@ -156,7 +204,7 @@ impl Module {
             | ModuleParameters::TonalCurve
             | ModuleParameters::CreativeColour
             | ModuleParameters::NoiseReduction
-            | ModuleParameters::Sharpening => Some(ColourEncoding::Linear),
+            | ModuleParameters::Sharpening => Some(working_space.image_contract()),
             ModuleParameters::OrientationAndCrop
             | ModuleParameters::Resize
             | ModuleParameters::QuantisationAndDither => None,

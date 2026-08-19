@@ -5,6 +5,12 @@ It currently establishes the image contract, serialisable module parameters,
 immutable pipeline snapshots, the documented default order, and contract
 checks at processing boundaries.
 
+Rendering can use `Pipeline::render_with_context` with a cloneable
+`CancellationToken`, typed stage progress, and explicit `Preview` or `Export`
+quality. The quality modes currently have identical semantics until a preview
+approximation is defined and approved. The compatibility `render` method uses
+the export mode and discards progress.
+
 The cleaner target architecture is documented in `../../docs/Architecture Decisions.md` and `../../docs/Clean Architecture Migration.md`. FocalCore owns the one production processing architecture; the planned `focal-io` crate owns decoding, profile interpretation, orientation, metadata, alpha handling, output conversion, and encoding. Experimental applications must not become competing production pipelines.
 
 The default processing order is:
@@ -29,9 +35,22 @@ in the in-memory pipeline. Crop is deferred for now.
 
 Only the sRGB input/output transforms, RGB multiplier form of white balance,
 exposure, and a provisional contrast operation currently alter pixels. The
-remaining modules are ordered identity placeholders. In particular, the tonal
-curve slot is ready to receive the separately developed curve evaluator
-without coupling Focal Core to its experimental GUI.
+remaining modules are ordered identity placeholders. Render reports mark
+these stages as placeholders rather than claiming that they processed pixels.
+In particular, the tonal curve slot is ready to receive the separately
+developed curve evaluator without coupling Focal Core to its experimental GUI.
+The production evaluator is available as `SmoothCurve` and `CurveSet`; it
+supports only Smooth interpolation with Linked RGB, Luma, and Per-channel RGB
+modes. Its domain is canonical encoded Adobe RGB (1998), while full pipeline
+colour-domain integration remains a later migration step. Smooth uses the
+safeguarded default tangent semantics; FocalCurve's user-adjustable tension
+and handle controls remain experimental.
+
+Validated GUI-independent vectorscope analysis is also available under
+`focal_core::scope`. It owns numeric scope coordinates, decoded linear
+RGB-to-scope analysis, density data, radial display mapping, and
+reverse-selection overlays;
+FocalPlot retains egui texture construction and drawing.
 
 ## Current implementation versus decided direction
 

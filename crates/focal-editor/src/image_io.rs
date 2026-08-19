@@ -95,6 +95,26 @@ pub struct LoadResult {
     pub image: Result<DecodedImage, ImageIoError>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Thumbnail {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct ThumbnailRequest {
+    pub generation: u64,
+    pub path: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct ThumbnailResult {
+    pub generation: u64,
+    pub path: PathBuf,
+    pub image: Result<Thumbnail, ImageIoError>,
+}
+
 /// Starts the image decoder away from the egui thread.
 pub fn spawn_loader() -> (Sender<LoadRequest>, Receiver<LoadResult>) {
     let (request_sender, request_receiver) = mpsc::channel::<LoadRequest>();
@@ -119,6 +139,62 @@ pub fn spawn_loader() -> (Sender<LoadRequest>, Receiver<LoadResult>) {
         })
         .expect("image loader thread should start");
     (request_sender, result_receiver)
+}
+
+pub fn spawn_thumbnail_loader() -> (Sender<ThumbnailRequest>, Receiver<ThumbnailResult>) {
+    let (request_sender, request_receiver) = mpsc::channel::<ThumbnailRequest>();
+    let (result_sender, result_receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("focal-editor-thumbnails".to_owned())
+        .spawn(move || {
+            while let Ok(first) = request_receiver.recv() {
+                for request in newest_thumbnail_batch(first, &request_receiver) {
+                    let path = request.path;
+                    let result = ThumbnailResult {
+                        generation: request.generation,
+                        path: path.clone(),
+                        image: decode_thumbnail(&path, 160),
+                    };
+                    if result_sender.send(result).is_err() {
+                        return;
+                    }
+                }
+            }
+        })
+        .expect("thumbnail loader thread should start");
+    (request_sender, result_receiver)
+}
+
+fn newest_thumbnail_batch(
+    first: ThumbnailRequest,
+    receiver: &Receiver<ThumbnailRequest>,
+) -> Vec<ThumbnailRequest> {
+    let mut requests = vec![first];
+    requests.extend(receiver.try_iter());
+    let newest_generation = requests
+        .iter()
+        .map(|request| request.generation)
+        .max()
+        .unwrap_or(0);
+    requests.retain(|request| request.generation == newest_generation);
+    requests
+}
+
+pub fn decode_thumbnail(path: &Path, maximum_dimension: u32) -> Result<Thumbnail, ImageIoError> {
+    let image = ImageReader::open(path)
+        .map_err(|source| ImageIoError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .decode()
+        .map_err(ImageIoError::Decode)?
+        .thumbnail(maximum_dimension, maximum_dimension)
+        .to_rgba8();
+    Ok(Thumbnail {
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw(),
+    })
 }
 
 fn srgb_to_linear(value: f32) -> f32 {
@@ -199,5 +275,39 @@ mod tests {
             image.pixels(),
             &[[128.0 / 255.0, 64.0 / 255.0, 32.0 / 255.0]]
         );
+    }
+
+    #[test]
+    fn thumbnail_worker_drops_queued_requests_from_obsolete_directories() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(ThumbnailRequest {
+                generation: 1,
+                path: PathBuf::from("old-b.jpg"),
+            })
+            .unwrap();
+        sender
+            .send(ThumbnailRequest {
+                generation: 2,
+                path: PathBuf::from("new-a.jpg"),
+            })
+            .unwrap();
+        sender
+            .send(ThumbnailRequest {
+                generation: 2,
+                path: PathBuf::from("new-b.jpg"),
+            })
+            .unwrap();
+
+        let batch = newest_thumbnail_batch(
+            ThumbnailRequest {
+                generation: 1,
+                path: PathBuf::from("old-a.jpg"),
+            },
+            &receiver,
+        );
+
+        assert_eq!(batch.len(), 2);
+        assert!(batch.iter().all(|request| request.generation == 2));
     }
 }

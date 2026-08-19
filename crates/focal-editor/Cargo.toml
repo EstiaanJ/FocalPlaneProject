@@ -8,6 +8,7 @@ license = "GPL-3.0-or-later"
 [dependencies]
 eframe.workspace = true
 focal-core.workspace = true
+focal-plot.workspace = true
 image.workspace = true
 rfd.workspace = true
 serde.workspace = true

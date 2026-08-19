@@ -62,7 +62,7 @@ Regression test: `pipeline::tests::wide_gamut_values_remain_distinct_until_after
 
 Forward analysis accumulates premultiplied colour and divides by accumulated alpha, recovering the unassociated source colour. Reverse highlighting multiplies a pixel by alpha without dividing it back out. A half-transparent red is therefore plotted at full red chroma but searched for at roughly half chroma, so hovering the plotted red does not select the source pixel.
 
-The alpha policy is now explicit: warn, obtain confirmation, and flatten to opaque RGB at the shared file boundary before analysis. Until that boundary is implemented, the two directions still disagree and the regression remains useful evidence of the current defect. Internal semi-transparent scope processing is not a product requirement.
+The alpha policy is now explicit: warn, obtain confirmation, and flatten to opaque RGB at the shared file boundary before analysis. The current harness keeps forward analysis and reverse highlighting consistent for its experimental semi-transparent inputs, while internal semi-transparent scope processing remains outside the product requirement.
 
 Regression test: `vectorscope::tests::semi_transparent_pixels_use_the_same_colour_in_analysis_and_reverse_highlighting` in `crates/better-plots/src/vectorscope.rs`.
 
@@ -88,8 +88,40 @@ These are not recorded as confirmed bugs yet:
 
 - ICC identification in the curve tool searches profile bytes for names such as `Adobe`, `A98`, and `sRGB`; it is not a real ICC parser and may misidentify custom profiles.
 - Better Plots deliberately assumes decoded sRGB and ignores embedded profiles. The UI discloses this, but it limits the diagnostic meaning of the scopes.
-- Background workers reject stale results, but active Better Plots analysis and reverse-highlight scans cannot be cancelled. Large images may delay a click-driven search even though stale results are eventually discarded.
-- FocalCore has no cancellation or progress interface yet, despite those being central preview requirements.
+- Background workers reject stale results, but active Better Plots spatial-analysis scans cannot be cancelled. Large images may still delay rectangle or hover analysis even though stale results are eventually discarded.
+- FocalCore now exposes cancellation, progress, and Preview/Export quality; the 150 ms cancellation target still needs a target-system benchmark.
 - Current curve code and UI may still say “Luminance” for weighted encoded channels. The decided term is **Luma**, using coefficients appropriate to the canonical Adobe RGB primaries.
 
 See [[Project Audits#Project audit — 2026-08-19|Project audit — 2026-08-19]] for the architectural and product implications.
+
+# Bug report — 2026-08-19 follow-up
+
+The second non-editor bug-checking pass found and corrected the following
+boundary defects. Their regression tests remain active.
+
+| ID | Area | Problem | Regression test |
+| --- | --- | --- | --- |
+| FP-CORE-003 | FocalCore | Cancellation requested by a progress callback after the initial or final progress update was reported as a successful render. | `pipeline::tests::cancellation_during_initial_progress_cancels_an_empty_pipeline`, `pipeline::tests::cancellation_during_empty_completion_progress_does_not_report_success`, and `pipeline::tests::cancellation_during_final_progress_does_not_report_success` |
+| FP-CORE-004 | FocalCore | Negative white-balance multipliers were accepted as valid parameters and could produce negative channel values. | `pipeline::tests::negative_white_balance_multipliers_are_rejected` |
+| FP-PLOTS-004 | Better Plots | The duplicated harness scope mapping accepted out-of-domain linear source coordinates, and negative reverse-highlight radii were silently clamped. | `vectorscope::tests::linear_source_coordinates_reject_values_outside_display_domain` and `vectorscope::tests::reverse_highlight_rejects_negative_radius` |
+| FP-PLOTS-005 | Better Plots | Reverse scope searches started continuously from pointer hover, could not receive clicks because the plot used hover-only sensing, and did not cancel active scans. | `app::tests::scope_hover_does_not_start_reverse_search`, `app::tests::scope_panels_capture_clicks_without_enabling_dragging`, and `loader::tests::cancelled_highlight_does_not_emit_a_stale_result` |
+
+# Focal Editor follow-up — 2026-08-19
+
+These defects were confirmed during the filmstrip performance review and are
+fixed with active regression tests.
+
+| ID | Severity | Confirmed defect | Regression test |
+| --- | --- | --- | --- |
+| FP-EDITOR-001 | High | Selecting a sibling rebuilt the filmstrip, discarded every cached thumbnail, and queued the directory again. | `selecting_a_sibling_does_not_rebuild_an_unchanged_filmstrip` |
+| FP-EDITOR-002 | Medium | The thumbnail worker continued decoding obsolete queued directories even though their results could never be accepted. | `thumbnail_worker_drops_queued_requests_from_obsolete_directories` |
+| FP-EDITOR-003 | High | A preview request could invalidate an unrelated in-flight image load because both used one generation identity. | `preview_requests_do_not_invalidate_an_in_flight_image_load` |
+| FP-EDITOR-004 | High | Export could write an older accepted preview after the controls or selected source had changed. | `export_requires_pixels_from_the_current_completed_render` |
+| FP-EDITOR-005 | High | Loading a main image replaced its small filmstrip texture with the full-resolution texture, retaining very large GPU allocations while browsing. | `loading_main_image_does_not_replace_cached_filmstrip_thumbnail` |
+| FP-EDITOR-006 | Medium | Completed thumbnail work did not keep UI polling alive, so prefetched images could remain visually stuck until another interaction. | `pending_thumbnails_keep_ui_polling_after_other_work_finishes` |
+
+Filmstrip loading is now demand-driven. It prefetches twice the number of
+currently visible items, biases the spare viewport toward the available
+scroll direction near either end, and requests a new window as the filmstrip
+scrolls. `filmstrip_prefetches_twice_the_visible_thumbnail_count` protects
+that policy.

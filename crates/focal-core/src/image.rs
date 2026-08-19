@@ -63,13 +63,17 @@ impl Image {
     /// # Errors
     ///
     /// Returns [`ImageError`] when the dimensions overflow, the pixel count
-    /// does not match the dimensions, or any channel is non-finite.
+    /// does not match the dimensions, any dimension is zero, or any channel
+    /// is non-finite.
     pub fn new(
         width: u32,
         height: u32,
         pixels: Vec<[f32; 3]>,
         contract: ImageContract,
     ) -> Result<Self, ImageError> {
+        if width == 0 || height == 0 {
+            return Err(ImageError::ZeroDimension);
+        }
         let expected = usize::try_from(width)
             .ok()
             .and_then(|width| {
@@ -127,6 +131,7 @@ impl Image {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImageError {
     DimensionsOverflow,
+    ZeroDimension,
     PixelCount { expected: usize, actual: usize },
     NonFinitePixel,
 }
@@ -137,6 +142,7 @@ impl fmt::Display for ImageError {
             Self::DimensionsOverflow => {
                 write!(formatter, "image dimensions overflow addressable memory")
             }
+            Self::ZeroDimension => write!(formatter, "image dimensions must be non-zero"),
             Self::PixelCount { expected, actual } => {
                 write!(formatter, "expected {expected} pixels, received {actual}")
             }
@@ -146,3 +152,35 @@ impl fmt::Display for ImageError {
 }
 
 impl std::error::Error for ImageError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_dimensions_are_rejected() {
+        assert_eq!(
+            Image::new(0, 1, Vec::new(), ImageContract::SRGB_DISPLAY).unwrap_err(),
+            ImageError::ZeroDimension
+        );
+        assert_eq!(
+            Image::new(1, 0, Vec::new(), ImageContract::SRGB_DISPLAY).unwrap_err(),
+            ImageError::ZeroDimension
+        );
+    }
+
+    #[test]
+    fn structural_and_numeric_image_errors_remain_distinct() {
+        assert_eq!(
+            Image::new(2, 1, vec![[0.0; 3]], ImageContract::SRGB_DISPLAY).unwrap_err(),
+            ImageError::PixelCount {
+                expected: 2,
+                actual: 1,
+            }
+        );
+        assert_eq!(
+            Image::new(1, 1, vec![[f32::NAN; 3]], ImageContract::SRGB_DISPLAY).unwrap_err(),
+            ImageError::NonFinitePixel
+        );
+    }
+}

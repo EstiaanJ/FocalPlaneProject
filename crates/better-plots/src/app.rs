@@ -9,14 +9,13 @@
 use std::{path::PathBuf, sync::Arc};
 
 use eframe::egui::{
-    self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
+    self, Color32, CornerRadius, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind,
+    TextureHandle, Vec2,
 };
 
-use crate::{
-    loader::{AnalysisKind, ImageLoader, LoadEvent, LoadedImage},
-    vectorscope::{
-        AnalysisRegion, DensityScale, ScopeSpace, VectorscopeAnalysis, render_trace, ring_colour,
-    },
+use crate::loader::{AnalysisKind, ImageLoader, LoadEvent, LoadedImage};
+use better_plots::vectorscope::{
+    AnalysisRegion, DensityScale, ScopeSpace, VectorscopeAnalysis, render_trace, ring_colour,
 };
 
 const BACKGROUND: Color32 = Color32::from_rgb(3, 4, 5);
@@ -132,6 +131,13 @@ enum ScopeHitArea {
 }
 
 impl ScopeHitArea {
+    fn space(self) -> ScopeSpace {
+        match self {
+            Self::Ryb { .. } => ScopeSpace::Ryb,
+            Self::Cie { .. } => ScopeSpace::Cie1931,
+        }
+    }
+
     fn coordinate(&self, pointer: Pos2) -> Option<[f32; 2]> {
         match self {
             Self::Ryb { centre, radius } => {
@@ -151,6 +157,34 @@ impl ScopeHitArea {
             Self::Cie { .. } => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReverseInteraction {
+    None,
+    Cancel,
+    Select { centre: [f32; 2], radius: f32 },
+}
+
+fn reverse_interaction_action(
+    primary_clicked: bool,
+    secondary_clicked: bool,
+    centre: Option<[f32; 2]>,
+    radius: f32,
+) -> ReverseInteraction {
+    if secondary_clicked {
+        ReverseInteraction::Cancel
+    } else if primary_clicked {
+        centre.map_or(ReverseInteraction::None, |centre| {
+            ReverseInteraction::Select { centre, radius }
+        })
+    } else {
+        ReverseInteraction::None
+    }
+}
+
+fn scope_sense() -> Sense {
+    Sense::click()
 }
 
 pub struct BetterPlotsApp {
@@ -619,7 +653,7 @@ impl BetterPlotsApp {
         let available = plot_rect.size();
         let side = available.x.min(available.y).max(1.0);
         let rect = Rect::from_center_size(plot_rect.center(), Vec2::splat(side));
-        let response = ui.allocate_rect(plot_rect, Sense::hover());
+        let response = ui.allocate_rect(plot_rect, scope_sense());
         let painter = ui.painter_at(response.rect);
         painter.rect_filled(response.rect, CornerRadius::ZERO, BACKGROUND);
         painter.circle_filled(rect.center(), side * 0.495, SCOPE_BACKGROUND);
@@ -700,7 +734,7 @@ impl BetterPlotsApp {
         let available = plot_rect.size() - Vec2::splat(16.0);
         let chart_size = fit_size(Vec2::new(CIE_X_MAX, CIE_Y_MAX), available).max(Vec2::splat(1.0));
         let chart = Rect::from_center_size(plot_rect.center(), chart_size);
-        let response = ui.allocate_rect(plot_rect, Sense::hover());
+        let response = ui.allocate_rect(plot_rect, scope_sense());
         let painter = ui.painter_at(response.rect);
         painter.rect_filled(response.rect, CornerRadius::ZERO, BACKGROUND);
         draw_cie1931_background(&painter, chart, DensityScale::Linear);
@@ -758,6 +792,7 @@ impl BetterPlotsApp {
     }
 
     fn clear_reverse_highlight(&mut self) {
+        self.loader.cancel_highlight();
         self.reverse_texture = None;
         self.reverse_request = None;
         self.reverse_query = None;
@@ -769,20 +804,36 @@ impl BetterPlotsApp {
         response: &egui::Response,
         area: ScopeHitArea,
     ) {
-        let Some(pointer) = response.hover_pos() else {
+        if response.clicked_by(PointerButton::Secondary) {
             self.clear_reverse_highlight();
             return;
-        };
-        let Some(centre) = area.coordinate(pointer) else {
-            self.clear_reverse_highlight();
-            return;
-        };
+        }
+        let centre = response
+            .hover_pos()
+            .and_then(|pointer| area.coordinate(pointer));
         let scroll = ui.input(|input| input.smooth_scroll_delta.y);
         if scroll.abs() > f32::EPSILON {
             self.reverse_radius = (self.reverse_radius * (scroll / 120.0).exp()).clamp(0.002, 0.25);
-            self.reverse_query = None;
         }
-        self.request_reverse_highlight(centre, self.reverse_radius);
+
+        match reverse_interaction_action(
+            response.clicked_by(PointerButton::Primary),
+            false,
+            centre,
+            self.reverse_radius,
+        ) {
+            ReverseInteraction::Select { centre, radius } => {
+                self.request_reverse_highlight(centre, radius);
+            }
+            ReverseInteraction::Cancel | ReverseInteraction::None => {
+                if scroll.abs() > f32::EPSILON
+                    && let Some((space, centre, _)) = self.reverse_query
+                    && space == area.space()
+                {
+                    self.request_reverse_highlight(centre, self.reverse_radius);
+                }
+            }
+        }
         if self.reverse_request.is_some() {
             ui.ctx().request_repaint();
         }
@@ -1349,5 +1400,31 @@ mod tests {
         let resized = resize_rect(original, RectHandle::BottomRight, [90.0, 95.0]);
         assert_point_eq(resized.min, original.min);
         assert_point_eq(resized.max, [90.0, 95.0]);
+    }
+
+    #[test]
+    fn scope_hover_does_not_start_reverse_search() {
+        assert_eq!(
+            reverse_interaction_action(false, false, Some([0.25, 0.75]), 0.02),
+            ReverseInteraction::None
+        );
+        assert_eq!(
+            reverse_interaction_action(true, false, Some([0.25, 0.75]), 0.02),
+            ReverseInteraction::Select {
+                centre: [0.25, 0.75],
+                radius: 0.02,
+            }
+        );
+        assert_eq!(
+            reverse_interaction_action(false, true, Some([0.25, 0.75]), 0.02),
+            ReverseInteraction::Cancel
+        );
+    }
+
+    #[test]
+    fn scope_panels_capture_clicks_without_enabling_dragging() {
+        let sense = scope_sense();
+        assert!(sense.senses_click());
+        assert!(!sense.senses_drag());
     }
 }

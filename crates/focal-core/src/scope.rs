@@ -1,6 +1,12 @@
-// Plot coordinates and 8-bit texture components require bounded numeric casts.
-// Every float-to-integer colour cast below follows explicit [0, 1] clamping or
-// construction, and image/scope dimensions are practically far below isize::MAX.
+//! GUI-independent vectorscope analysis.
+//!
+//! This module owns the numeric scope contract used by the experimental
+//! `FocalPlot` harness. Texture construction, colour meshes, and egui drawing
+//! remain outside `FocalCore`.
+
+// Scope coordinates intentionally cross between bounded image integers and
+// normalised floating-point display coordinates. The source implementation
+// uses the same explicit conversions and bounds checks.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -8,63 +14,13 @@
     clippy::cast_sign_loss,
     clippy::excessive_precision
 )]
-#![allow(clippy::unreadable_literal)] // Published CIE table values remain recognisable as written.
 
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicBool, Ordering},
-};
-
-use eframe::egui::{Color32, ColorImage};
+use std::{fmt, sync::OnceLock};
 
 pub const SCOPE_RESOLUTION: usize = 512;
 const MAX_SAMPLES: usize = 1_000_000;
 const CIE_X_MAX: f32 = 0.8;
 const CIE_Y_MAX: f32 = 0.9;
-/// CIE 1931 2° spectral locus sampled every 10 nm from 380–780 nm.
-pub const CIE1931_LOCUS: [[f32; 2]; 41] = [
-    [0.1741123, 0.0049637],
-    [0.1738008, 0.0049154],
-    [0.1733369, 0.0047967],
-    [0.1725766, 0.0047993],
-    [0.1714074, 0.0051022],
-    [0.1688775, 0.0069002],
-    [0.1644118, 0.0108576],
-    [0.1566409, 0.0177048],
-    [0.1439604, 0.0297030],
-    [0.1241185, 0.0578025],
-    [0.0912935, 0.1327021],
-    [0.0453907, 0.2949760],
-    [0.0081680, 0.5384231],
-    [0.0138702, 0.7501864],
-    [0.0743024, 0.8338031],
-    [0.1547221, 0.8058635],
-    [0.2296197, 0.7543291],
-    [0.3016039, 0.6923077],
-    [0.3731015, 0.6244509],
-    [0.4440625, 0.5547139],
-    [0.5124864, 0.4865908],
-    [0.5751513, 0.4242322],
-    [0.6270366, 0.3724911],
-    [0.6657636, 0.3340107],
-    [0.6915040, 0.3083422],
-    [0.7079178, 0.2920271],
-    [0.7190329, 0.2809350],
-    [0.7259923, 0.2740077],
-    [0.7299690, 0.2700310],
-    [0.7319933, 0.2680067],
-    [0.7334170, 0.2665830],
-    [0.7343902, 0.2656098],
-    [0.7346873, 0.2653127],
-    [0.7346783, 0.2653217],
-    [0.7346680, 0.2653320],
-    [0.7346939, 0.2653061],
-    [0.7348243, 0.2651757],
-    [0.7345133, 0.2654867],
-    [0.7345133, 0.2654867],
-    [0.7345133, 0.2654867],
-    [0.7368421, 0.2631579],
-];
 const RGB_HUE_KNOTS: [f32; 7] = [
     0.0,
     1.0 / 6.0,
@@ -86,7 +42,7 @@ const RYB_HUE_KNOTS: [f32; 7] = [
 static RGB_TO_RYB_SECOND_DERIVATIVES: OnceLock<[f32; 7]> = OnceLock::new();
 static RYB_TO_RGB_SECOND_DERIVATIVES: OnceLock<[f32; 7]> = OnceLock::new();
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VectorscopeAnalysis {
     pub space: ScopeSpace,
     pub resolution: usize,
@@ -114,12 +70,48 @@ pub enum AnalysisRegion {
     Rectangle { min: [f32; 2], max: [f32; 2] },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopeError {
+    ResolutionTooSmall { actual: usize },
+    PixelBufferLength { expected: usize, actual: usize },
+    DimensionOverflow,
+    NonFiniteRegion,
+    NegativeCircleRadius,
+    ReversedRectangle,
+}
+
+impl fmt::Display for ScopeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResolutionTooSmall { actual } => {
+                write!(
+                    formatter,
+                    "vectorscope resolution must exceed one, got {actual}"
+                )
+            }
+            Self::PixelBufferLength { expected, actual } => write!(
+                formatter,
+                "RGBA dimensions require {expected} bytes, received {actual}"
+            ),
+            Self::DimensionOverflow => {
+                write!(formatter, "RGBA dimensions overflow addressable memory")
+            }
+            Self::NonFiniteRegion => write!(formatter, "scope region contains a non-finite value"),
+            Self::NegativeCircleRadius => {
+                write!(formatter, "scope circle radius must not be negative")
+            }
+            Self::ReversedRectangle => write!(formatter, "scope rectangle bounds must be ordered"),
+        }
+    }
+}
+
+impl std::error::Error for ScopeError {}
+
 #[must_use]
 pub fn analyse(rgba: &[u8], width: u32, height: u32, resolution: usize) -> VectorscopeAnalysis {
     analyse_region_in_space(rgba, width, height, resolution, None, ScopeSpace::Ryb)
 }
 
-#[allow(dead_code)]
 #[must_use]
 pub fn analyse_region(
     rgba: &[u8],
@@ -141,10 +133,14 @@ pub fn analyse_cie1931(
     analyse_region_in_space(rgba, width, height, resolution, None, ScopeSpace::Cie1931)
 }
 
+/// Analyses an RGBA image, panicking only through the compatibility wrapper
+/// when its dimensions or region are invalid. New callers should prefer
+/// [`try_analyse_region_in_space`] when input is not already trusted.
+///
 /// # Panics
 ///
-/// Panics if `resolution` is smaller than two or the buffer length does not
-/// match its dimensions.
+/// Panics when the resolution, dimensions, pixel buffer, or selected region
+/// is invalid. Use [`try_analyse_region_in_space`] for untrusted inputs.
 #[must_use]
 pub fn analyse_region_in_space(
     rgba: &[u8],
@@ -154,17 +150,33 @@ pub fn analyse_region_in_space(
     region: Option<AnalysisRegion>,
     space: ScopeSpace,
 ) -> VectorscopeAnalysis {
-    assert!(resolution > 1, "vectorscope resolution must exceed one");
-    let width = width as usize;
-    let height = height as usize;
-    assert_eq!(
-        rgba.len(),
-        width * height * 4,
-        "RGBA dimensions must match data"
-    );
+    try_analyse_region_in_space(rgba, width, height, resolution, region, space)
+        .expect("valid vectorscope analysis inputs")
+}
 
-    let mut bins = vec![0_u32; resolution * resolution];
-    let mut colour_sums = vec![[0.0_f32; 3]; resolution * resolution];
+/// Fallible vectorscope analysis for untrusted image and region boundaries.
+///
+/// # Errors
+///
+/// Returns [`ScopeError`] when the resolution, dimensions, pixel buffer, or
+/// selected region is invalid.
+pub fn try_analyse_region_in_space(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    resolution: usize,
+    region: Option<AnalysisRegion>,
+    space: ScopeSpace,
+) -> Result<VectorscopeAnalysis, ScopeError> {
+    validate_inputs(rgba, width, height, resolution, region)?;
+    let width = usize::try_from(width).map_err(|_| ScopeError::DimensionOverflow)?;
+    let height = usize::try_from(height).map_err(|_| ScopeError::DimensionOverflow)?;
+    let bin_count = resolution
+        .checked_mul(resolution)
+        .ok_or(ScopeError::DimensionOverflow)?;
+
+    let mut bins = vec![0_u32; bin_count];
+    let mut colour_sums = vec![[0.0_f32; 3]; bin_count];
     let (region_min_x, region_min_y, region_max_x, region_max_y) =
         region_bounds(region, width as f32, height as f32);
     let region_width = region_max_x.saturating_sub(region_min_x);
@@ -230,13 +242,71 @@ pub fn analyse_region_in_space(
             }
         })
         .collect();
-    VectorscopeAnalysis {
+    Ok(VectorscopeAnalysis {
         space,
         resolution,
         density,
         colours,
         sampled_pixels,
+    })
+}
+
+fn validate_inputs(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    resolution: usize,
+    region: Option<AnalysisRegion>,
+) -> Result<(), ScopeError> {
+    if resolution <= 1 {
+        return Err(ScopeError::ResolutionTooSmall { actual: resolution });
     }
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(ScopeError::DimensionOverflow)?;
+    if rgba.len() != expected {
+        return Err(ScopeError::PixelBufferLength {
+            expected,
+            actual: rgba.len(),
+        });
+    }
+    if let Some(region) = region {
+        match region {
+            AnalysisRegion::Circle {
+                centre: [x, y],
+                radius,
+            } => {
+                if !x.is_finite() || !y.is_finite() || !radius.is_finite() {
+                    return Err(ScopeError::NonFiniteRegion);
+                }
+                if radius < 0.0 {
+                    return Err(ScopeError::NegativeCircleRadius);
+                }
+            }
+            AnalysisRegion::Rectangle {
+                min: [min_x, min_y],
+                max: [max_x, max_y],
+            } => {
+                if !min_x.is_finite()
+                    || !min_y.is_finite()
+                    || !max_x.is_finite()
+                    || !max_y.is_finite()
+                {
+                    return Err(ScopeError::NonFiniteRegion);
+                }
+                if min_x > max_x || min_y > max_y {
+                    return Err(ScopeError::ReversedRectangle);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn plot_coordinate(rgb: [f32; 3], space: ScopeSpace) -> (f32, f32) {
@@ -245,8 +315,6 @@ fn plot_coordinate(rgb: [f32; 3], space: ScopeSpace) -> (f32, f32) {
             let (hue, chroma) = rgb_hue_chroma(rgb);
             let ryb_hue = rgb_hue_to_ryb_hue(hue);
             let angle = std::f32::consts::TAU * ryb_hue;
-            // Match darktable's familiar orientation: red at twelve o'clock,
-            // with the ring proceeding counter-clockwise on screen.
             (
                 -angle.sin() * chroma * 0.5 + 0.5,
                 -angle.cos() * chroma * 0.5 + 0.5,
@@ -254,7 +322,6 @@ fn plot_coordinate(rgb: [f32; 3], space: ScopeSpace) -> (f32, f32) {
         }
         ScopeSpace::Cie1931 => {
             let [x, y] = rgb_to_cie1931_xy(rgb);
-            // The useful visible gamut fits in x=[0, 0.8], y=[0, 0.9].
             (x / CIE_X_MAX, 1.0 - y / CIE_Y_MAX)
         }
     }
@@ -300,84 +367,14 @@ fn region_contains(region: Option<AnalysisRegion>, x: f32, y: f32) -> bool {
     }
 }
 
+/// Converts a linear RGB sample into the normalised scope coordinate.
 #[must_use]
-pub fn render_trace(
-    analysis: &VectorscopeAnalysis,
-    intensity: f32,
-    sharpness: f32,
-    density_scale: DensityScale,
-    inverse_highlight: bool,
-) -> ColorImage {
-    let size = analysis.resolution;
-    let centre = (size - 1) as f32 * 0.5;
-    let radius = centre.max(1.0);
-    let mut pixels = Vec::with_capacity(size * size);
-
-    for y in 0..size {
-        for x in 0..size {
-            let dx = (x as f32 - centre) / radius;
-            let dy = (y as f32 - centre) / radius;
-            let radial = dx.hypot(dy);
-            let Some(source_coordinate) = source_coordinate(
-                [x as f32 / (size - 1) as f32, y as f32 / (size - 1) as f32],
-                analysis.space,
-                density_scale,
-            ) else {
-                pixels.push(Color32::TRANSPARENT);
-                continue;
-            };
-            if analysis.space == ScopeSpace::Ryb && radial > 1.0 {
-                pixels.push(Color32::TRANSPARENT);
-                continue;
-            }
-            let source_x = source_coordinate[0] * (size - 1) as f32;
-            let source_y = source_coordinate[1] * (size - 1) as f32;
-            if !(0.0..=(size - 1) as f32).contains(&source_x)
-                || !(0.0..=(size - 1) as f32).contains(&source_y)
-            {
-                pixels.push(Color32::TRANSPARENT);
-                continue;
-            }
-            let density = bilinear_density(&analysis.density, size, source_x, source_y);
-            if density <= 0.000_1 {
-                pixels.push(Color32::TRANSPARENT);
-                continue;
-            }
-
-            let base = if analysis.space == ScopeSpace::Cie1931 {
-                bilinear_colour(&analysis.colours, size, source_x, source_y)
-            } else {
-                let angle = (-dx).atan2(-dy).rem_euclid(std::f32::consts::TAU);
-                let ryb_hue = angle / std::f32::consts::TAU;
-                let display_hue = ryb_hue_to_rgb_hue(ryb_hue);
-                hsv_to_rgb(display_hue, 0.82, 1.0)
-            };
-            let alpha = (density * intensity)
-                .clamp(0.0, 1.0)
-                .powf(sharpness.clamp(0.1, 8.0));
-            let white_mix = alpha.powf(1.6) * 0.52;
-            let mut colour = [
-                base[0] + (1.0 - base[0]) * white_mix,
-                base[1] + (1.0 - base[1]) * white_mix,
-                base[2] + (1.0 - base[2]) * white_mix,
-            ];
-            if inverse_highlight {
-                for channel in &mut colour {
-                    *channel = 1.0 - *channel;
-                }
-            }
-            pixels.push(Color32::from_rgba_unmultiplied(
-                (colour[0] * 255.0) as u8,
-                (colour[1] * 255.0) as u8,
-                (colour[2] * 255.0) as u8,
-                (alpha * 230.0) as u8,
-            ));
-        }
-    }
-
-    ColorImage::new([size, size], pixels)
+pub fn scope_coordinate(rgb: [f32; 3], space: ScopeSpace) -> [f32; 2] {
+    let (x, y) = plot_coordinate(rgb, space);
+    [x, y]
 }
 
+/// Applies the selected radial display transform to a linear scope coordinate.
 #[must_use]
 pub fn source_coordinate(
     output: [f32; 2],
@@ -391,19 +388,13 @@ pub fn source_coordinate(
             None
         };
     }
-    let centre = match space {
-        ScopeSpace::Ryb => [0.5, 0.5],
-        ScopeSpace::Cie1931 => [0.312_7 / CIE_X_MAX, 1.0 - 0.329_0 / CIE_Y_MAX],
-    };
+    let centre = scope_centre(space);
     let delta = [output[0] - centre[0], output[1] - centre[1]];
     let radius = delta[0].hypot(delta[1]);
     if radius <= f32::EPSILON {
         return Some(centre);
     }
-    let max_radius = match space {
-        ScopeSpace::Ryb => 0.5,
-        ScopeSpace::Cie1931 => 0.65,
-    };
+    let max_radius = scope_max_radius(space);
     let linear_radius = ((radius / max_radius * 30.0_f32.ln()).exp() - 1.0) / 29.0 * max_radius;
     let source = [
         centre[0] + delta[0] / radius * linear_radius,
@@ -416,16 +407,7 @@ pub fn source_coordinate(
     }
 }
 
-/// Convert a decoded linear RGB sample into the normalized scope coordinate.
-/// The returned coordinate is in the same [0, 1] square used by scope textures.
-#[must_use]
-pub fn scope_coordinate(rgb: [f32; 3], space: ScopeSpace) -> [f32; 2] {
-    let (x, y) = plot_coordinate(rgb, space);
-    [x, y]
-}
-
-/// Apply the selected radial display transform to a linear scope coordinate.
-/// This is the forward counterpart of [`source_coordinate`].
+/// Applies the selected radial display transform in the forward direction.
 #[must_use]
 pub fn display_coordinate(
     source: [f32; 2],
@@ -439,19 +421,13 @@ pub fn display_coordinate(
             None
         };
     }
-    let centre = match space {
-        ScopeSpace::Ryb => [0.5, 0.5],
-        ScopeSpace::Cie1931 => [0.312_7 / CIE_X_MAX, 1.0 - 0.329_0 / CIE_Y_MAX],
-    };
+    let centre = scope_centre(space);
     let delta = [source[0] - centre[0], source[1] - centre[1]];
     let radius = delta[0].hypot(delta[1]);
     if radius <= f32::EPSILON {
         return Some(centre);
     }
-    let max_radius = match space {
-        ScopeSpace::Ryb => 0.5,
-        ScopeSpace::Cie1931 => 0.65,
-    };
+    let max_radius = scope_max_radius(space);
     let mapped_radius = ((radius / max_radius * 29.0 + 1.0).ln() / 30.0_f32.ln()) * max_radius;
     let output = [
         centre[0] + delta[0] / radius * mapped_radius,
@@ -464,13 +440,26 @@ pub fn display_coordinate(
     }
 }
 
-/// Render a transparent image layer for scope-to-image highlighting. Pixels
-/// whose scope coordinates fall within `radius` of `centre` are painted with
-/// their inverse sRGB colour, making the selected colour family visible over
-/// the original photo.
+fn scope_centre(space: ScopeSpace) -> [f32; 2] {
+    match space {
+        ScopeSpace::Ryb => [0.5, 0.5],
+        ScopeSpace::Cie1931 => [0.312_7 / CIE_X_MAX, 1.0 - 0.329_0 / CIE_Y_MAX],
+    }
+}
+
+fn scope_max_radius(space: ScopeSpace) -> f32 {
+    match space {
+        ScopeSpace::Ryb => 0.5,
+        ScopeSpace::Cie1931 => 0.65,
+    }
+}
+
+/// Renders the pure RGBA reverse-selection overlay used by the harness.
+///
 /// # Panics
 ///
-/// Panics when the buffer length does not match its dimensions.
+/// Panics when the image dimensions, pixel buffer, or selection centre is
+/// invalid. Use [`try_render_reverse_highlight`] for untrusted inputs.
 #[must_use]
 pub fn render_reverse_highlight(
     rgba: &[u8],
@@ -481,30 +470,17 @@ pub fn render_reverse_highlight(
     space: ScopeSpace,
     density_scale: DensityScale,
 ) -> Vec<u8> {
-    render_reverse_highlight_with_cancellation(
-        rgba,
-        width,
-        height,
-        centre,
-        radius,
-        space,
-        density_scale,
-        &AtomicBool::new(false),
-    )
-    .expect("reverse-highlight render was not cancelled")
+    try_render_reverse_highlight(rgba, width, height, centre, radius, space, density_scale)
+        .expect("valid reverse-highlight inputs")
 }
 
-/// Renders a reverse-selection overlay while observing cooperative cancellation.
+/// Fallible form of [`render_reverse_highlight`].
 ///
-/// Returns `None` when `cancellation` is set before or during the scan.
+/// # Errors
 ///
-/// # Panics
-///
-/// Panics when the buffer length does not match its dimensions or when the
-/// radius is negative.
-#[allow(clippy::too_many_arguments)]
-#[must_use]
-pub fn render_reverse_highlight_with_cancellation(
+/// Returns [`ScopeError`] when the image dimensions, pixel buffer, or
+/// selection centre is invalid.
+pub fn try_render_reverse_highlight(
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -512,21 +488,19 @@ pub fn render_reverse_highlight_with_cancellation(
     radius: f32,
     space: ScopeSpace,
     density_scale: DensityScale,
-    cancellation: &AtomicBool,
-) -> Option<Vec<u8>> {
-    let width = width as usize;
-    let height = height as usize;
-    assert_eq!(rgba.len(), width * height * 4);
-    assert!(
-        radius >= 0.0,
-        "reverse-highlight radius must be non-negative"
-    );
+) -> Result<Vec<u8>, ScopeError> {
+    validate_inputs(rgba, width, height, 2, None)?;
+    if !centre[0].is_finite() || !centre[1].is_finite() || !radius.is_finite() {
+        return Err(ScopeError::NonFiniteRegion);
+    }
+    if radius < 0.0 {
+        return Err(ScopeError::NegativeCircleRadius);
+    }
+    let width = usize::try_from(width).map_err(|_| ScopeError::DimensionOverflow)?;
+    let height = usize::try_from(height).map_err(|_| ScopeError::DimensionOverflow)?;
     let radius = radius.max(0.000_1);
     let mut output = vec![0_u8; rgba.len()];
     for y in 0..height {
-        if cancellation.load(Ordering::Relaxed) {
-            return None;
-        }
         for x in 0..width {
             let index = (y * width + x) * 4;
             let alpha = f32::from(rgba[index + 3]) / 255.0;
@@ -547,8 +521,6 @@ pub fn render_reverse_highlight_with_cancellation(
             if distance > radius {
                 continue;
             }
-            // A soft edge prevents the overlay from flickering as the pointer
-            // crosses individual scope bins while retaining a strong centre.
             let edge = (1.0 - distance / radius).powf(0.35);
             output[index] = 255 - rgba[index];
             output[index + 1] = 255 - rgba[index + 1];
@@ -556,47 +528,32 @@ pub fn render_reverse_highlight_with_cancellation(
             output[index + 3] = (edge * 220.0).round() as u8;
         }
     }
-    Some(output)
+    Ok(output)
 }
 
-fn bilinear_density(values: &[f32], size: usize, x: f32, y: f32) -> f32 {
-    let x0 = x.floor() as usize;
-    let y0 = y.floor() as usize;
-    let x1 = (x0 + 1).min(size - 1);
-    let y1 = (y0 + 1).min(size - 1);
-    let tx = x - x0 as f32;
-    let ty = y - y0 as f32;
-    let top = values[y0 * size + x0] * (1.0 - tx) + values[y0 * size + x1] * tx;
-    let bottom = values[y1 * size + x0] * (1.0 - tx) + values[y1 * size + x1] * tx;
-    top * (1.0 - ty) + bottom * ty
-}
-
-fn bilinear_colour(values: &[[f32; 3]], size: usize, x: f32, y: f32) -> [f32; 3] {
-    let x0 = x.floor() as usize;
-    let y0 = y.floor() as usize;
-    let x1 = (x0 + 1).min(size - 1);
-    let y1 = (y0 + 1).min(size - 1);
-    let tx = x - x0 as f32;
-    let ty = y - y0 as f32;
-    let mut result = [0.0; 3];
-    for channel in 0..3 {
-        let top =
-            values[y0 * size + x0][channel] * (1.0 - tx) + values[y0 * size + x1][channel] * tx;
-        let bottom =
-            values[y1 * size + x0][channel] * (1.0 - tx) + values[y1 * size + x1][channel] * tx;
-        result[channel] = top * (1.0 - ty) + bottom * ty;
-    }
-    result
-}
-
+/// Maps standard RGB hue to the reference RYB hue arrangement.
 #[must_use]
-pub fn ring_colour(turns: f32) -> Color32 {
-    let hue = ryb_hue_to_rgb_hue(turns.rem_euclid(1.0));
-    let rgb = hsv_to_rgb(hue, 0.72, 1.0);
-    Color32::from_rgb(
-        (rgb[0] * 255.0) as u8,
-        (rgb[1] * 255.0) as u8,
-        (rgb[2] * 255.0) as u8,
+pub fn rgb_hue_to_ryb_hue(hue: f32) -> f32 {
+    let second_derivatives = RGB_TO_RYB_SECOND_DERIVATIVES
+        .get_or_init(|| natural_spline_second_derivatives(&RGB_HUE_KNOTS, &RYB_HUE_KNOTS));
+    cubic_spline(
+        hue.rem_euclid(1.0),
+        &RGB_HUE_KNOTS,
+        &RYB_HUE_KNOTS,
+        second_derivatives,
+    )
+}
+
+/// Maps RYB hue back to standard RGB hue for the display ring.
+#[must_use]
+pub fn ryb_hue_to_rgb_hue(hue: f32) -> f32 {
+    let second_derivatives = RYB_TO_RGB_SECOND_DERIVATIVES
+        .get_or_init(|| natural_spline_second_derivatives(&RYB_HUE_KNOTS, &RGB_HUE_KNOTS));
+    cubic_spline(
+        hue.rem_euclid(1.0),
+        &RYB_HUE_KNOTS,
+        &RGB_HUE_KNOTS,
+        second_derivatives,
     )
 }
 
@@ -618,7 +575,6 @@ fn linear_to_srgb(value: f32) -> f32 {
 }
 
 fn rgb_to_cie1931_xy(rgb: [f32; 3]) -> [f32; 2] {
-    // IEC 61966-2-1 sRGB/D65 to CIE XYZ, with the input already linearised.
     let x = 0.412_456_4 * rgb[0] + 0.357_576_1 * rgb[1] + 0.180_437_5 * rgb[2];
     let y = 0.212_672_9 * rgb[0] + 0.715_152_2 * rgb[1] + 0.072_175_0 * rgb[2];
     let z = 0.019_333_9 * rgb[0] + 0.119_192_0 * rgb[1] + 0.950_304_1 * rgb[2];
@@ -645,28 +601,6 @@ fn rgb_hue_chroma(rgb: [f32; 3]) -> (f32, f32) {
         (rgb[0] - rgb[1]) / chroma + 4.0
     };
     (hue_sector / 6.0, chroma.clamp(0.0, 1.0))
-}
-
-fn rgb_hue_to_ryb_hue(hue: f32) -> f32 {
-    let second_derivatives = RGB_TO_RYB_SECOND_DERIVATIVES
-        .get_or_init(|| natural_spline_second_derivatives(&RGB_HUE_KNOTS, &RYB_HUE_KNOTS));
-    cubic_spline(
-        hue.rem_euclid(1.0),
-        &RGB_HUE_KNOTS,
-        &RYB_HUE_KNOTS,
-        second_derivatives,
-    )
-}
-
-fn ryb_hue_to_rgb_hue(hue: f32) -> f32 {
-    let second_derivatives = RYB_TO_RGB_SECOND_DERIVATIVES
-        .get_or_init(|| natural_spline_second_derivatives(&RYB_HUE_KNOTS, &RGB_HUE_KNOTS));
-    cubic_spline(
-        hue.rem_euclid(1.0),
-        &RYB_HUE_KNOTS,
-        &RGB_HUE_KNOTS,
-        second_derivatives,
-    )
 }
 
 fn cubic_spline(value: f32, x: &[f32; 7], y: &[f32; 7], second_derivatives: &[f32; 7]) -> f32 {
@@ -717,23 +651,6 @@ fn natural_spline_second_derivatives(x: &[f32; 7], y: &[f32; 7]) -> [f32; 7] {
             / diagonal[index];
     }
     second_derivatives
-}
-
-fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
-    let sector = hue.rem_euclid(1.0) * 6.0;
-    let index = sector.floor() as i32;
-    let fraction = sector - index as f32;
-    let p = value * (1.0 - saturation);
-    let q = value * (1.0 - saturation * fraction);
-    let t = value * (1.0 - saturation * (1.0 - fraction));
-    match index {
-        0 => [value, t, p],
-        1 => [q, value, p],
-        2 => [p, value, t],
-        3 => [p, q, value],
-        4 => [t, p, value],
-        _ => [value, p, q],
-    }
 }
 
 fn blur_density(bins: &[u32], size: usize) -> Vec<f32> {
@@ -825,8 +742,7 @@ mod tests {
     fn ryb_mapping_round_trips_knots() {
         for hue in RGB_HUE_KNOTS {
             let round_trip = ryb_hue_to_rgb_hue(rgb_hue_to_ryb_hue(hue.rem_euclid(1.0)));
-            let expected = hue.rem_euclid(1.0);
-            assert!((round_trip - expected).abs() < 1.0e-5);
+            assert!((round_trip - hue.rem_euclid(1.0)).abs() < 1.0e-5);
         }
     }
 
@@ -857,6 +773,18 @@ mod tests {
     }
 
     #[test]
+    fn linear_source_coordinates_reject_values_outside_the_display_domain() {
+        assert_eq!(
+            source_coordinate([-0.01, 0.5], ScopeSpace::Ryb, DensityScale::Linear),
+            None
+        );
+        assert_eq!(
+            source_coordinate([0.5, 1.01], ScopeSpace::Ryb, DensityScale::Linear),
+            None
+        );
+    }
+
+    #[test]
     fn radial_display_mapping_round_trips() {
         let source = [0.73, 0.42];
         let display = display_coordinate(source, ScopeSpace::Ryb, DensityScale::Logarithmic)
@@ -868,23 +796,8 @@ mod tests {
     }
 
     #[test]
-    fn linear_source_coordinates_reject_values_outside_display_domain() {
-        assert_eq!(
-            source_coordinate([-0.01, 0.5], ScopeSpace::Ryb, DensityScale::Linear),
-            None
-        );
-        assert_eq!(
-            source_coordinate([0.5, 1.01], ScopeSpace::Cie1931, DensityScale::Linear),
-            None
-        );
-    }
-
-    #[test]
     fn reverse_highlight_selects_only_matching_scope_colour() {
-        let image = [
-            255, 0, 0, 255, // red
-            0, 0, 255, 255, // blue
-        ];
+        let image = [255, 0, 0, 255, 0, 0, 255, 255];
         let centre = scope_coordinate([1.0, 0.0, 0.0], ScopeSpace::Ryb);
         let highlighted = render_reverse_highlight(
             &image,
@@ -895,39 +808,23 @@ mod tests {
             ScopeSpace::Ryb,
             DensityScale::Linear,
         );
-        assert!(highlighted[3] > 0, "red pixel should be selected");
-        assert_eq!(highlighted[7], 0, "blue pixel should not be selected");
+        assert!(highlighted[3] > 0);
+        assert_eq!(highlighted[7], 0);
     }
 
     #[test]
-    #[should_panic(expected = "reverse-highlight radius must be non-negative")]
-    fn reverse_highlight_rejects_negative_radius() {
-        let _ = render_reverse_highlight(
-            &[255, 0, 0, 255],
-            1,
-            1,
-            [0.5, 0.5],
-            -1.0,
-            ScopeSpace::Ryb,
-            DensityScale::Linear,
-        );
-    }
-
-    #[test]
-    fn cancelled_reverse_highlight_does_not_scan_the_image() {
-        let cancellation = AtomicBool::new(true);
+    fn reverse_highlight_rejects_a_negative_radius() {
         assert_eq!(
-            render_reverse_highlight_with_cancellation(
+            try_render_reverse_highlight(
                 &[255, 0, 0, 255],
                 1,
                 1,
                 [0.5, 0.5],
-                0.01,
+                -0.1,
                 ScopeSpace::Ryb,
                 DensityScale::Linear,
-                &cancellation,
             ),
-            None
+            Err(ScopeError::NegativeCircleRadius)
         );
     }
 
@@ -979,7 +876,6 @@ mod tests {
         let image = [255, 0, 0, 128];
         let analysis = analyse(&image, 1, 1, 33);
         assert_eq!(analysis.sampled_pixels, 1);
-
         let analysed_red = scope_coordinate([1.0, 0.0, 0.0], ScopeSpace::Ryb);
         let highlighted = render_reverse_highlight(
             &image,
@@ -990,11 +886,7 @@ mod tests {
             ScopeSpace::Ryb,
             DensityScale::Linear,
         );
-
-        assert!(
-            highlighted[3] > 0,
-            "a scope point produced by analysis must select the same semi-transparent source pixel in reverse"
-        );
+        assert!(highlighted[3] > 0);
     }
 
     #[test]
@@ -1004,10 +896,35 @@ mod tests {
         let at_knot = rgb_hue_to_ryb_hue(knot);
         let left_slope = (at_knot - rgb_hue_to_ryb_hue(knot - epsilon)) / epsilon;
         let right_slope = (rgb_hue_to_ryb_hue(knot + epsilon) - at_knot) / epsilon;
+        assert!((left_slope - right_slope).abs() < 0.05);
+    }
 
-        assert!(
-            (left_slope - right_slope).abs() < 0.05,
-            "darktable's vectorscope uses a cubic spline, whose first derivative is continuous at this knot; left={left_slope}, right={right_slope}"
+    #[test]
+    fn invalid_analysis_boundaries_are_rejected() {
+        assert_eq!(
+            try_analyse_region_in_space(&[], 1, 1, 1, None, ScopeSpace::Ryb),
+            Err(ScopeError::ResolutionTooSmall { actual: 1 })
+        );
+        assert_eq!(
+            try_analyse_region_in_space(&[], 1, 1, 33, None, ScopeSpace::Ryb),
+            Err(ScopeError::PixelBufferLength {
+                expected: 4,
+                actual: 0
+            })
+        );
+        assert_eq!(
+            try_analyse_region_in_space(
+                &[0; 4],
+                1,
+                1,
+                33,
+                Some(AnalysisRegion::Rectangle {
+                    min: [1.0, 0.0],
+                    max: [0.0, 1.0]
+                }),
+                ScopeSpace::Ryb
+            ),
+            Err(ScopeError::ReversedRectangle)
         );
     }
 }
