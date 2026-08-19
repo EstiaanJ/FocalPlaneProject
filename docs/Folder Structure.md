@@ -13,7 +13,7 @@ This note distinguishes the current repository from the intended long-term layou
 
 ### `crates/focal-editor`
 
-Reserved for Focal Editor. Its GUI must not be implemented until the human owner supplies the GUI description.
+The Focal Editor application. Its initial GUI description is documented in [[Focal-Editor Old GUI]]; keep the first implementation narrow and do not carry over the old processing model.
 
 ### `crates/focal-core`
 

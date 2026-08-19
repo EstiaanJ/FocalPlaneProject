@@ -155,7 +155,7 @@ The existing image-to-scope hover and spatial rectangle experiment may remain in
 - The MVP uses an opinionated ordered pipeline, not a DAG.
 - No crop or local adjustments for the first vertical slice.
 - The old editor is a GUI reference only.
-- Focal Editor implementation must wait for the human owner's GUI description.
+- Focal Editor implementation follows the initial human GUI description in [[Focal-Editor Old GUI]]; subsequent consequential GUI changes still require human input.
 - Agents must bring consequential colour, interaction, and architectural decisions back to the human owner.
 
 See [[Clean Architecture Migration]] for the instructions which put these decisions into practice.

@@ -1,0 +1,21 @@
+[package]
+name = "focal-editor"
+version.workspace = true
+edition.workspace = true
+description = "Standalone FocalPlane photo editor"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+eframe.workspace = true
+focal-core.workspace = true
+image.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

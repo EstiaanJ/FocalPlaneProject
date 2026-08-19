@@ -1,0 +1,31 @@
+# Focal Editor
+
+Focal Editor is the standalone desktop editor described in `../../docs/Focal-Editor Old GUI.md`, `../../docs/MVP.md`, and `../../docs/Focal Editor & Focal Core.md`.
+
+## Scope of this first slice
+
+- Open one PNG or JPEG directly; do not require FocalLib or an import/catalogue workflow.
+- Show Before and After previews.
+- Implement exposure in stops and contrast from `-100` to `+100`.
+- Keep a small input/output histogram visible.
+- Save editable state as a versioned JSON sidecar.
+- Export an 8-bit sRGB PNG.
+- Keep the UI responsive with background loading/rendering and latest-request-wins result handling.
+
+The human GUI description currently says not to include the curve control, crop controls, or the old response curve. Do not add those speculatively. FocalPlot scope widgets will be integrated after their GUI-independent analysis is extracted and the outstanding bugs are fixed.
+
+## Boundaries
+
+- Use egui and eframe for the GUI.
+- Keep decoding and pixel conversion in small testable functions until the shared `focal-io` crate exists.
+- Keep all image processing in FocalCore. Do not create an editor-specific processing pipeline.
+- Do not make FocalCore depend on egui, eframe, or file dialogs.
+- Use immutable preview requests and ignore stale results.
+- Do not silently decide unresolved colour-management or saved-state semantics. This first prototype uses the current FocalCore decoded sRGB contract and records its limitation.
+
+## Quality
+
+- Add unit tests for image conversion, histogram bins, sidecar round trips, and latest-result acceptance.
+- Prefer readable, modular code over a large `app.rs`.
+- Keep the UI thread free of image decoding and rendering.
+- Use British English in user-facing text and documentation where practical.

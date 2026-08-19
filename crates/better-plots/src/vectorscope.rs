@@ -9,6 +9,8 @@
     clippy::excessive_precision
 )]
 
+use std::sync::OnceLock;
+
 use eframe::egui::{Color32, ColorImage};
 
 pub const SCOPE_RESOLUTION: usize = 512;
@@ -33,6 +35,8 @@ const RYB_HUE_KNOTS: [f32; 7] = [
     5.0 / 6.0,
     1.0,
 ];
+static RGB_TO_RYB_SECOND_DERIVATIVES: OnceLock<[f32; 7]> = OnceLock::new();
+static RYB_TO_RGB_SECOND_DERIVATIVES: OnceLock<[f32; 7]> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct VectorscopeAnalysis {
@@ -422,9 +426,9 @@ pub fn render_reverse_highlight(
                 continue;
             }
             let rgb = [
-                srgb_to_linear(f32::from(rgba[index]) / 255.0) * alpha,
-                srgb_to_linear(f32::from(rgba[index + 1]) / 255.0) * alpha,
-                srgb_to_linear(f32::from(rgba[index + 2]) / 255.0) * alpha,
+                srgb_to_linear(f32::from(rgba[index]) / 255.0),
+                srgb_to_linear(f32::from(rgba[index + 1]) / 255.0),
+                srgb_to_linear(f32::from(rgba[index + 2]) / 255.0),
             ];
             let Some(point) =
                 display_coordinate(scope_coordinate(rgb, space), space, density_scale)
@@ -535,17 +539,75 @@ fn rgb_hue_chroma(rgb: [f32; 3]) -> (f32, f32) {
 }
 
 fn rgb_hue_to_ryb_hue(hue: f32) -> f32 {
-    interpolate_knots(hue.rem_euclid(1.0), &RGB_HUE_KNOTS, &RYB_HUE_KNOTS)
+    let second_derivatives = RGB_TO_RYB_SECOND_DERIVATIVES
+        .get_or_init(|| natural_spline_second_derivatives(&RGB_HUE_KNOTS, &RYB_HUE_KNOTS));
+    cubic_spline(
+        hue.rem_euclid(1.0),
+        &RGB_HUE_KNOTS,
+        &RYB_HUE_KNOTS,
+        second_derivatives,
+    )
 }
 
 fn ryb_hue_to_rgb_hue(hue: f32) -> f32 {
-    interpolate_knots(hue.rem_euclid(1.0), &RYB_HUE_KNOTS, &RGB_HUE_KNOTS)
+    let second_derivatives = RYB_TO_RGB_SECOND_DERIVATIVES
+        .get_or_init(|| natural_spline_second_derivatives(&RYB_HUE_KNOTS, &RGB_HUE_KNOTS));
+    cubic_spline(
+        hue.rem_euclid(1.0),
+        &RYB_HUE_KNOTS,
+        &RGB_HUE_KNOTS,
+        second_derivatives,
+    )
 }
 
-fn interpolate_knots(value: f32, x: &[f32; 7], y: &[f32; 7]) -> f32 {
+fn cubic_spline(value: f32, x: &[f32; 7], y: &[f32; 7], second_derivatives: &[f32; 7]) -> f32 {
     let segment = (0..6).find(|&index| value < x[index + 1]).unwrap_or(5);
-    let amount = (value - x[segment]) / (x[segment + 1] - x[segment]);
-    y[segment] + amount * (y[segment + 1] - y[segment])
+    let distance = value - x[segment];
+    let width = x[segment + 1] - x[segment];
+    y[segment]
+        + distance
+            * ((y[segment + 1] - y[segment]) / width
+                - (second_derivatives[segment + 1] / 6.0 + second_derivatives[segment] / 3.0)
+                    * width
+                + distance
+                    * (0.5 * second_derivatives[segment]
+                        + distance
+                            * (second_derivatives[segment + 1] - second_derivatives[segment])
+                            / (6.0 * width)))
+}
+
+fn natural_spline_second_derivatives(x: &[f32; 7], y: &[f32; 7]) -> [f32; 7] {
+    let mut lower = [0.0_f32; 7];
+    let mut diagonal = [0.0_f32; 7];
+    let mut upper = [0.0_f32; 7];
+    let mut right_hand_side = [0.0_f32; 7];
+
+    diagonal[0] = 1.0;
+    diagonal[6] = 1.0;
+    for index in 1..6 {
+        let left_width = x[index] - x[index - 1];
+        let right_width = x[index + 1] - x[index];
+        lower[index] = left_width / 6.0;
+        diagonal[index] = (left_width + right_width) / 3.0;
+        upper[index] = right_width / 6.0;
+        right_hand_side[index] =
+            (y[index + 1] - y[index]) / right_width - (y[index] - y[index - 1]) / left_width;
+    }
+
+    for index in 1..7 {
+        let factor = lower[index] / diagonal[index - 1];
+        diagonal[index] -= factor * upper[index - 1];
+        right_hand_side[index] -= factor * right_hand_side[index - 1];
+    }
+
+    let mut second_derivatives = [0.0_f32; 7];
+    second_derivatives[6] = right_hand_side[6] / diagonal[6];
+    for index in (0..6).rev() {
+        second_derivatives[index] = (right_hand_side[index]
+            - upper[index] * second_derivatives[index + 1])
+            / diagonal[index];
+    }
+    second_derivatives
 }
 
 fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
@@ -760,7 +822,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug FP-PLOTS-001: reverse highlighting premultiplies semi-transparent colours inconsistently"]
     fn semi_transparent_pixels_use_the_same_colour_in_analysis_and_reverse_highlighting() {
         let image = [255, 0, 0, 128];
         let analysis = analyse(&image, 1, 1, 33);
@@ -784,7 +845,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug FP-PLOTS-002: RYB hue mapping is piecewise linear instead of the documented darktable spline"]
     fn ryb_hue_mapping_has_a_continuous_slope_at_internal_knots() {
         let knot = RGB_HUE_KNOTS[1];
         let epsilon = 0.000_1;

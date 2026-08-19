@@ -7,7 +7,7 @@ aliases:
 
 # Clean architecture migration
 
-This is the implementation guide for consolidating the current experiments into the architecture defined by [[Architecture Decisions]]. It deliberately contains no Focal Editor GUI specification. Do not begin implementing Focal Editor until the human owner supplies that description.
+This is the implementation guide for consolidating the current experiments into the architecture defined by [[Architecture Decisions]]. The initial Focal Editor GUI description is now documented in [[Focal-Editor Old GUI]]. Keep later GUI decisions in a dedicated description rather than silently expanding this migration guide.
 
 ## Intended dependency direction
 
@@ -86,8 +86,8 @@ Avoid fusing modules in the reference merely for speed. An accelerated implement
 ### Phase 0 — documentation and human GUI description
 
 - Keep [[Architecture Decisions]] current.
-- Receive and document the human owner's Focal Editor GUI description.
-- Do not implement Focal Editor before that description exists.
+- The initial description exists in [[Focal-Editor Old GUI]] and authorises the first narrow slice.
+- Stop and ask the human owner before adding controls or workflows outside that description.
 
 ### Phase 1 — repository foundation
 
@@ -146,7 +146,7 @@ Remove each regression test's `#[ignore]` only when the implementation makes it 
 
 ### Phase 7 — build the first Focal Editor vertical slice
 
-Only after the human GUI description is documented:
+The initial GUI description is documented. Implement only its currently approved slice:
 
 1. open one decoded PNG or JPEG without import;
 2. process it through `focal-io` and FocalCore;

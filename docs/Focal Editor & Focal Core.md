@@ -17,6 +17,19 @@ The GUI will be heavily based on [[Folder Structure#OLD_EDITOR|the old Focal Pla
 
 This is still a rewrite. The old processing pipeline and film-photography model must not be carried over. There are no film stocks or film-specific concepts in the new editor. It has presets.
 
+## Initial GUI slice
+
+The first implementation follows [[Focal-Editor Old GUI]] and is deliberately narrow:
+
+- open one PNG or JPEG directly, without an import or catalogue step;
+- show Before and After previews;
+- expose exposure in stops and contrast from `-100` to `+100`;
+- show the input/output histogram;
+- save editable parameters as a versioned JSON sidecar;
+- export an 8-bit sRGB PNG.
+
+The initial GUI description excludes the curve control, crop controls, and the old response curve. FocalPlot scopes remain an integration step after their GUI-independent analysis has been extracted. This is a GUI scope decision, not permission to create a second processing pipeline.
+
 ## Standalone editor
 
 Focal Editor must be usable without FocalLib. Opening one photograph must never require importing it, creating a catalogue, or adopting the photo-management workflow.

@@ -9,17 +9,19 @@ Each audit's bugs live under their own level-one dated heading. Future bug repor
 
 # Bug report — 2026-08-19
 
-This report records confirmed defects found during the project-wide audit on 2026-08-19. None of these bugs has been fixed yet. [[Architecture Decisions]] records the human decisions made in response; this report remains the defect ledger until the implementations and regression tests are corrected.
+This report records confirmed defects found during the project-wide audit on 2026-08-19. [[Architecture Decisions]] records the human decisions made in response, and this report remains the defect ledger with the regression tests which protect each correction.
 
-Each bug has a focused regression test. The tests are ignored by the ordinary test run so that routine checks remain useful, but they can be run explicitly and currently fail:
+The implementations and active regression tests now resolve FP-CORE-001, FP-CORE-002, FP-CURVE-001, FP-PLOTS-001, FP-PLOTS-002, and FP-PLOTS-003. FP-PLOTS-001 is made consistent in the current experimental harness; the planned `focal-io` transparency boundary remains the product-level replacement for internal semi-transparent processing.
+
+Each bug has a focused regression test. The tests are now active in the ordinary suite. The entries below preserve the original defect descriptions and explain the correction or remaining product-level boundary.
 
 ```sh
-cargo test -p focal-core -- --ignored
-cargo test -p exposure-curve-tool -- --ignored
-cargo test -p better-plots -- --ignored
+cargo test -p focal-core
+cargo test -p exposure-curve-tool
+cargo test -p better-plots
 ```
 
-Once a bug is fixed, remove its `#[ignore]` attribute and keep the test as a permanent regression test.
+The historical rule was to remove `#[ignore]` once a bug was fixed. The corrected tests remain permanent regression tests.
 
 ## Confirmed bugs
 

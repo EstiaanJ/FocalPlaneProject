@@ -116,6 +116,34 @@ impl Module {
         }
     }
 
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        match self.parameters {
+            ModuleParameters::WhiteBalance { multipliers } => multipliers
+                .iter()
+                .all(|value| value.is_finite())
+                .then_some(())
+                .ok_or("white-balance multipliers must be finite"),
+            ModuleParameters::Exposure { stops } => stops
+                .is_finite()
+                .then_some(())
+                .ok_or("exposure stops must be finite"),
+            ModuleParameters::Contrast { amount } => amount
+                .is_finite()
+                .then_some(())
+                .ok_or("contrast amount must be finite"),
+            ModuleParameters::InputTransform
+            | ModuleParameters::OrientationAndCrop
+            | ModuleParameters::HighlightsAndShadows
+            | ModuleParameters::TonalCurve
+            | ModuleParameters::CreativeColour
+            | ModuleParameters::NoiseReduction
+            | ModuleParameters::Sharpening
+            | ModuleParameters::Resize
+            | ModuleParameters::OutputTransform
+            | ModuleParameters::QuantisationAndDither => Ok(()),
+        }
+    }
+
     #[must_use]
     pub(crate) const fn required_encoding(&self) -> Option<ColourEncoding> {
         match self.parameters {

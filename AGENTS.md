@@ -19,7 +19,7 @@ Read these documents before making architectural or product changes:
 - FocalCore must not depend on egui, eframe, file dialogs, or application layout.
 - Use an explicit ordered pipeline. Do not introduce a DAG or node architecture.
 - Do not implement crop or local adjustments for the first vertical slice.
-- Do not begin Focal Editor implementation until the human owner provides and documents the GUI description.
+- The human owner has now provided the initial GUI description in `docs/Focal-Editor Old GUI.md`; follow it for the first slice and do not add controls which it explicitly excludes.
 
 ## Current colour decisions
 

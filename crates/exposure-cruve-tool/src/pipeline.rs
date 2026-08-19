@@ -132,8 +132,9 @@ pub struct SourceImage {
 pub struct PreparedImage {
     pub width: u32,
     pub height: u32,
-    /// Values after input-space interpretation, colour conversion, gamut
-    /// clipping, and sRGB-like encoding. This is the editable curve domain.
+    /// Values in the canonical encoded Adobe RGB (1998) curve domain.
+    /// Output sRGB conversion is deliberately deferred until after the
+    /// editable curve.
     pub curve_domain: Vec<[f32; 3]>,
     pub before_rgba: Vec<u8>,
     pub source_pixels: Arc<Vec<[f32; 3]>>,
@@ -310,8 +311,9 @@ fn prepare_pixels(
     let mut curve_domain = Vec::with_capacity(source_pixels.len());
     let mut before_rgba = Vec::with_capacity(source_pixels.len() * 4);
     for encoded in source_pixels.iter().copied() {
-        let srgb_encoded = input_to_srgb_curve_domain(encoded, input_colour_space);
-        curve_domain.push(srgb_encoded);
+        let adobe_encoded = input_to_adobe_rgb_curve_domain(encoded, input_colour_space);
+        curve_domain.push(adobe_encoded);
+        let srgb_encoded = adobe_rgb_to_srgb(adobe_encoded);
         before_rgba.extend_from_slice(&[
             to_byte(srgb_encoded[0]),
             to_byte(srgb_encoded[1]),
@@ -362,10 +364,11 @@ pub fn render<F: FnMut(f32)>(
             input_histogram.add(rgb);
             output_histogram.add(adjusted);
         }
+        let srgb_encoded = adobe_rgb_to_srgb(adjusted);
         after_rgba.extend_from_slice(&[
-            to_byte(adjusted[0]),
-            to_byte(adjusted[1]),
-            to_byte(adjusted[2]),
+            to_byte(srgb_encoded[0]),
+            to_byte(srgb_encoded[1]),
+            to_byte(srgb_encoded[2]),
             255,
         ]);
 
@@ -578,15 +581,32 @@ fn to_byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-fn input_to_srgb_curve_domain(encoded: [f32; 3], input_colour_space: InputColourSpace) -> [f32; 3] {
+fn input_to_adobe_rgb_curve_domain(
+    encoded: [f32; 3],
+    input_colour_space: InputColourSpace,
+) -> [f32; 3] {
     match input_colour_space {
-        InputColourSpace::Srgb => encoded.map(|channel| channel.clamp(0.0, 1.0)),
-        InputColourSpace::AdobeRgb => adobe_rgb_to_srgb_curve_domain(encoded),
+        InputColourSpace::Srgb => srgb_to_adobe_rgb(encoded),
+        InputColourSpace::AdobeRgb => encoded.map(|channel| channel.clamp(0.0, 1.0)),
     }
 }
 
-fn adobe_rgb_to_srgb_curve_domain(encoded: [f32; 3]) -> [f32; 3] {
-    let adobe_linear = encoded.map(|channel| channel.clamp(0.0, 1.0).powf(ADOBE_RGB_GAMMA));
+fn srgb_to_adobe_rgb(encoded: [f32; 3]) -> [f32; 3] {
+    let srgb_linear = encoded.map(|channel| decode_srgb(channel.clamp(0.0, 1.0)));
+
+    // Linear sRGB, D65 to linear Adobe RGB (1998), D65. The source is already
+    // inside the smaller sRGB gamut; only tiny numerical negatives need to be
+    // bounded at the canonical Adobe RGB image contract.
+    let adobe_linear = [
+        0.576_669 * srgb_linear[0] + 0.185_558 * srgb_linear[1] + 0.188_229 * srgb_linear[2],
+        0.297_345 * srgb_linear[0] + 0.627_364 * srgb_linear[1] + 0.075_291 * srgb_linear[2],
+        0.027_031 * srgb_linear[0] + 0.070_689 * srgb_linear[1] + 0.991_338 * srgb_linear[2],
+    ];
+    adobe_linear.map(encode_adobe_rgb)
+}
+
+fn adobe_rgb_to_srgb(encoded: [f32; 3]) -> [f32; 3] {
+    let adobe_linear = encoded.map(|channel| decode_adobe_rgb(channel.clamp(0.0, 1.0)));
 
     // Adobe RGB (1998), D65 primaries to linear sRGB, D65. This is a compact
     // reference transform for the controlled fixture, not a general ICC
@@ -599,9 +619,26 @@ fn adobe_rgb_to_srgb_curve_domain(encoded: [f32; 3]) -> [f32; 3] {
     ];
 
     // Gamut handling is explicit and deliberately simple for this prototype:
-    // clip in linear sRGB before encoding. A perceptual gamut mapper belongs
-    // outside the editable curve once the colour-management choice is settled.
+    // clip in linear sRGB only at the output boundary. A perceptual gamut
+    // mapper belongs outside the editable curve once the colour-management
+    // choice is settled.
     linear_srgb.map(encode_srgb)
+}
+
+fn decode_adobe_rgb(encoded: f32) -> f32 {
+    encoded.clamp(0.0, 1.0).powf(ADOBE_RGB_GAMMA)
+}
+
+fn encode_adobe_rgb(linear: f32) -> f32 {
+    linear.clamp(0.0, 1.0).powf(1.0 / ADOBE_RGB_GAMMA)
+}
+
+fn decode_srgb(encoded: f32) -> f32 {
+    if encoded <= 0.040_45 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn encode_srgb(linear: f32) -> f32 {
@@ -748,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_srgb_space_bypasses_adobe_conversion() {
+    fn selected_srgb_space_is_converted_to_the_canonical_adobe_domain() {
         let source = decode_image_bytes(include_bytes!(concat!(
             env!("OUT_DIR"),
             "/controlled_adobe_rgb.png"
@@ -855,7 +892,7 @@ mod tests {
             .enumerate()
             .filter_map(|(index, count)| (*count > 0.0).then_some(index))
             .collect();
-        assert_eq!(occupied, vec![27, 91]);
+        assert_eq!(occupied, vec![75, 89]);
     }
 
     #[test]
@@ -888,7 +925,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug FP-CURVE-001: Adobe RGB is clipped to sRGB before the editable curve"]
     fn wide_gamut_values_remain_distinct_until_after_the_editable_curve() {
         let source = super::SourceImage {
             width: 2,

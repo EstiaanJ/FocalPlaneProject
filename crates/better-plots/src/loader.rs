@@ -1,10 +1,13 @@
 use std::{
+    io::Cursor,
     path::{Path, PathBuf},
     sync::{
         Arc,
         mpsc::{self, Receiver, Sender},
     },
 };
+
+use image::{ImageDecoder, ImageFormat, codecs::jpeg::JpegDecoder, metadata::Orientation};
 
 use crate::vectorscope::{
     AnalysisRegion, DensityScale, SCOPE_RESOLUTION, ScopeSpace, VectorscopeAnalysis, analyse,
@@ -261,12 +264,25 @@ fn process_request(request: LoadRequest, event_sender: &Sender<LoadEvent>) -> bo
 }
 
 fn load_image(path: &Path) -> Result<LoadedImage, String> {
-    let decoded = image::ImageReader::open(path)
-        .map_err(|error| format!("Could not open {}: {error}", path.display()))?
-        .with_guessed_format()
-        .map_err(|error| format!("Could not identify {}: {error}", path.display()))?
-        .decode()
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+    let format = image::guess_format(&bytes)
+        .map_err(|error| format!("Could not identify {}: {error}", path.display()))?;
+    let orientation = if format == ImageFormat::Jpeg {
+        let mut decoder = JpegDecoder::new(Cursor::new(&bytes))
+            .map_err(|error| format!("Could not decode {}: {error}", path.display()))?;
+        decoder.orientation().map_err(|error| {
+            format!(
+                "Could not read orientation from {}: {error}",
+                path.display()
+            )
+        })?
+    } else {
+        Orientation::NoTransforms
+    };
+    let mut decoded = image::load_from_memory_with_format(&bytes, format)
         .map_err(|error| format!("Could not decode {}: {error}", path.display()))?;
+    decoded.apply_orientation(orientation);
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
     let rgba = rgba.into_raw();
@@ -355,7 +371,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known bug FP-PLOTS-003: JPEG EXIF orientation is ignored"]
     fn jpeg_exif_orientation_is_applied_before_scope_analysis() {
         let image = ImageBuffer::from_fn(2, 1, |x, _| {
             if x == 0 {

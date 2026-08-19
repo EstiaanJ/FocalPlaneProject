@@ -91,8 +91,25 @@ impl Pipeline {
     /// # Errors
     ///
     /// Returns [`PipelineError`] if a module receives pixels with the wrong
-    /// encoding or produces a non-finite channel value.
+    /// encoding, contains an invalid parameter, or produces a non-finite
+    /// channel value.
     pub fn render(&self, mut image: Image) -> Result<(Image, RenderReport), PipelineError> {
+        if self.snapshot.version != PIPELINE_VERSION {
+            return Err(PipelineError::UnsupportedPipelineVersion {
+                expected: PIPELINE_VERSION,
+                actual: self.snapshot.version,
+            });
+        }
+
+        for module in &self.snapshot.modules {
+            module
+                .validate()
+                .map_err(|reason| PipelineError::InvalidParameters {
+                    module: module.kind(),
+                    reason,
+                })?;
+        }
+
         let mut completed = Vec::with_capacity(self.snapshot.modules.len());
         for module in &self.snapshot.modules {
             if !module.enabled {
@@ -132,6 +149,14 @@ pub struct RenderReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PipelineError {
+    UnsupportedPipelineVersion {
+        expected: u32,
+        actual: u32,
+    },
+    InvalidParameters {
+        module: ModuleKind,
+        reason: &'static str,
+    },
     ContractMismatch {
         module: ModuleKind,
         expected: ColourEncoding,
@@ -145,6 +170,13 @@ pub enum PipelineError {
 impl fmt::Display for PipelineError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedPipelineVersion { expected, actual } => write!(
+                formatter,
+                "unsupported pipeline version {actual}; this renderer supports version {expected}"
+            ),
+            Self::InvalidParameters { module, reason } => {
+                write!(formatter, "{module:?} has invalid parameters: {reason}")
+            }
             Self::ContractMismatch {
                 module,
                 expected,
@@ -250,14 +282,14 @@ mod tests {
         let source = Image::new(1, 1, vec![[0.5; 3]], ImageContract::SRGB_DISPLAY).unwrap();
         assert_eq!(
             pipeline.render(source).unwrap_err(),
-            PipelineError::NonFiniteOutput {
+            PipelineError::InvalidParameters {
                 module: ModuleKind::Exposure,
+                reason: "exposure stops must be finite",
             }
         );
     }
 
     #[test]
-    #[ignore = "known bug FP-CORE-001: unsupported pipeline versions are not rejected"]
     fn unsupported_pipeline_version_is_rejected() {
         let pipeline = Pipeline::from_snapshot(PipelineSnapshot {
             version: PIPELINE_VERSION + 1,
@@ -266,14 +298,16 @@ mod tests {
         });
         let source = Image::new(1, 1, vec![[0.5; 3]], ImageContract::SRGB_DISPLAY).unwrap();
 
-        assert!(
-            pipeline.render(source).is_err(),
-            "a renderer must not silently interpret a snapshot from an unsupported pipeline version"
+        assert_eq!(
+            pipeline.render(source).unwrap_err(),
+            PipelineError::UnsupportedPipelineVersion {
+                expected: PIPELINE_VERSION,
+                actual: PIPELINE_VERSION + 1,
+            }
         );
     }
 
     #[test]
-    #[ignore = "known bug FP-CORE-002: non-finite parameters can succeed when their pixels remain finite"]
     fn non_finite_parameters_are_rejected_even_when_the_pixel_result_is_finite() {
         let pipeline = Pipeline::from_snapshot(PipelineSnapshot {
             version: PIPELINE_VERSION,
@@ -287,9 +321,12 @@ mod tests {
         });
         let source = Image::new(1, 1, vec![[0.5; 3]], ImageContract::SRGB_DISPLAY).unwrap();
 
-        assert!(
-            pipeline.render(source).is_err(),
-            "saved module parameters must be finite even when a particular input happens to produce finite pixels"
+        assert_eq!(
+            pipeline.render(source).unwrap_err(),
+            PipelineError::InvalidParameters {
+                module: ModuleKind::Exposure,
+                reason: "exposure stops must be finite",
+            }
         );
     }
 }

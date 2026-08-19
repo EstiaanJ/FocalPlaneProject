@@ -3,6 +3,7 @@ members = [
     "crates/better-plots",
     "crates/exposure-cruve-tool",
     "crates/focal-core",
+    "crates/focal-editor",
 ]
 resolver = "3"
 
