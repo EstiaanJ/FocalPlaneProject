@@ -1,0 +1,18 @@
+[package]
+name = "better-plots"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone plotting experiments for FocalPlane"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+eframe = "0.35"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.17"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

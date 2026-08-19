@@ -1,0 +1,23 @@
+[package]
+name = "exposure-curve-tool"
+version = "0.1.0"
+edition = "2024"
+description = "Experimental egui exposure curve interaction prototype for FocalPlane"
+license = "MIT"
+build = "build.rs"
+
+[dependencies]
+eframe = "0.35"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+png = "0.18"
+rfd = "0.17"
+
+[build-dependencies]
+png = "0.18"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,97 @@
+---
+aliases:
+  - Focal Editor
+  - Focal Core
+  - Editor and Core
+---
+
+# Focal Editor & Focal Core
+
+Focal Editor is a Rust photo-editing desktop application. It is currently the focus of the project. FocalLib and the separate preset editor are later projects.
+
+Use egui and eframe for the GUI. Keep GUI code outside image-processing and curve-evaluation logic so those parts remain independently testable and reusable.
+
+Shared decoding, orientation, ICC interpretation, metadata, transparency handling, and output encoding belong to the planned [[Architecture Decisions#Shared file and metadata boundary|`focal-io` boundary]]. FocalCore remains independent of file dialogs and file formats.
+
+The GUI will be heavily based on [[Folder Structure#OLD_EDITOR|the old Focal Plane editor]]. In my experience, GUI development with LLMs takes a lot of back and forth because it needs a human to verify things. I like the existing GUI with some exceptions, so its source is a useful reference and avoids rewriting too much code.
+
+This is still a rewrite. The old processing pipeline and film-photography model must not be carried over. There are no film stocks or film-specific concepts in the new editor. It has presets.
+
+## Standalone editor
+
+Focal Editor must be usable without FocalLib. Opening one photograph must never require importing it, creating a catalogue, or adopting the photo-management workflow.
+
+Focal Editor should eventually support:
+
+- careful editing of an individual photograph;
+- rapid editing of many photographs from the same scene;
+- copying a preset, later adjustments, selected corrections, or a complete edit to multiple selected photographs through interactive context menus.
+
+## GUI and Focal Core boundary
+
+There must be strict boundaries and strictly defined interfaces between the GUI and the image-rendering pipeline.
+
+The image-processing pipeline is called Focal Core. It is shared among FocalPlane applications and should work through a CLI without the GUI, or through a well-defined API when called by the GUI.
+
+FocalCurve and FocalPlot remain independently runnable experiments and visual test harnesses. Their validated GUI-independent processing must use or move into FocalCore rather than becoming alternate production pipelines. Their egui presentation and reusable widget code remain outside FocalCore.
+
+Image preview processing takes place for the GUI but remains the responsibility of Focal Core.
+
+Focal Core uses an explicit, modular, [[Focal Core Pipeline|opinionated processing order]]. Developers can rearrange modules for experiments, but Focal Editor users do not reorder them. A DAG remains a possible future evolution rather than an MVP architecture.
+
+## Preview and responsiveness
+
+The preview should not lie, but it must be fast and does not need to be full resolution. A visibly close approximation is acceptable. Finding the right compromise between preview accuracy and high-speed, real-time editing—especially with large X-T5 RAW files—will require experimentation.
+
+The UI must remain responsive while processing. Preview rendering should follow a **latest request wins** model:
+
+1. A control change requests a preview using the complete current edit state.
+2. If another change occurs while that preview is processing, obsolete work should stop immediately where practical.
+3. Processing restarts using both adjustments rather than finishing the stale request and queuing another.
+4. An operation may be reused only in the rare case where independence is known and doing so cannot produce a stale preview.
+
+Intermediate module results may be cached for previews when measurement justifies it. Changing a module invalidates its result and later work while potentially leaving earlier results available for reuse. Caching is optional for the first implementation. Each request operates on an immutable pipeline snapshot.
+
+Anything under 500 ms would be nice for an ordinary preview update. This is an interaction target, not permission to block the UI for 500 ms.
+
+Cooperative cancellation should normally stop obsolete work within 150 ms on the target system. Each render receives an immutable snapshot, cancellation token, progress reporter, and explicit Preview or Export quality. Stale progress and completion events must not replace the newest request.
+
+The progress bar, cancellation behaviour, and push-to-update mode are important parts of the design. See [[Open Questions]] for the exact meaning of push-to-update, which is not yet settled.
+
+## Internal photo representation
+
+Inside the process, a photo should be represented as finite `f32` per channel per pixel. Some submodules may need different internal representations, and their contracts should make that explicit.
+
+Floating point is not permission to erase semantics: each image must identify its domain, channel meaning, primaries and white point where applicable, and exposure convention. In the proper RAW architecture, the scene representation is unbounded by display range; clipping and quantisation belong at explicit display or output boundaries.
+
+The proper implementation must use a wide-gamut, scene-referred working domain. The exact primaries and encoding are not settled, and must be evaluated deliberately for web, print, calibrated-monitor, and archival output rather than defaulting silently to ACEScg or another convenient choice.
+
+For the decoded-image MVP only, the editable curve uses canonical encoded Adobe RGB (1998). This is temporary. The proper camera-RAW implementation will use a wide-gamut, scene-referred working domain; its exact primaries and encoding remain open.
+
+Fujifilm X-T5 support may be a first-class advantage even if this makes the software less generic. Matching Fujifilm's built-in JPEG appearance is not a goal, although it may be useful as a test reference.
+
+## Target system
+
+- Debian 13 with Cinnamon
+- Ryzen 5 CPU
+- 64 GB DDR4
+- Nvidia RTX 3060 Ti with 8 GB VRAM and proprietary drivers
+
+Linux desktop is the current target. Windows and macOS may be considered later; mobile and web are out of scope.
+
+## English coding standard
+
+Use British English where practical in code, comments, and documentation: `colour`, not `color`.
+
+## Related documentation
+
+- [[FocalPlane]] — project values and scope
+- [[MVP]] — first prototype and exclusions
+- [[Presets and Saved Edits]] — document and batch-edit model
+- [[Focal Core Pipeline]] — modular ordering, order experiments, and optional preview caching
+- [[Sliders]] — initial controls
+- [[Testing]] — CPU reference and controlled reproducibility
+- [[Engineering Principles]] — code quality and human-directed decision making
+- [[Folder Structure]] — current code locations
+- [[Architecture Decisions]] — settled architecture and colour contracts
+- [[Clean Architecture Migration]] — consolidation sequence and dependency direction

@@ -1,0 +1,16 @@
+[package]
+name = "focal-core"
+version.workspace = true
+edition.workspace = true
+description = "CPU reference image-processing pipeline for FocalPlane"
+license = "MIT"
+
+[dependencies]
+serde.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
