@@ -1096,6 +1096,7 @@ dependencies = [
  "eframe",
  "focal-core",
  "image",
+ "moxcms",
  "rfd",
  "serde",
  "serde_json",

@@ -7,7 +7,7 @@ use crate::{
     RenderProgress, RenderQuality,
 };
 
-pub const PIPELINE_VERSION: u32 = 1;
+pub const PIPELINE_VERSION: u32 = 3;
 
 /// Scene-linear RGB space used by processing modules.
 ///
@@ -16,14 +16,14 @@ pub const PIPELINE_VERSION: u32 = 1;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkingSpace {
     #[default]
-    LinearSrgb,
+    LinearAdobeRgb,
 }
 
 impl WorkingSpace {
     #[must_use]
     pub const fn image_contract(self) -> ImageContract {
         match self {
-            Self::LinearSrgb => ImageContract::LINEAR_SRGB,
+            Self::LinearAdobeRgb => ImageContract::LINEAR_ADOBE_RGB,
         }
     }
 }
@@ -47,16 +47,28 @@ impl Default for Pipeline {
             working_space: WorkingSpace::default(),
             modules: vec![
                 enabled(ModuleParameters::InputTransform),
-                enabled(ModuleParameters::OrientationAndCrop),
+                enabled(ModuleParameters::OrientationAndCrop { crop: None }),
                 enabled(ModuleParameters::WhiteBalance {
-                    multipliers: [1.0; 3],
+                    warmth: 0.0,
+                    tint: 0.0,
                 }),
                 enabled(ModuleParameters::Exposure { stops: 0.0 }),
                 enabled(ModuleParameters::HighlightsAndShadows),
+                enabled(ModuleParameters::NoiseReduction {
+                    luminance: 0.0,
+                    colour: 0.0,
+                }),
                 enabled(ModuleParameters::Contrast { amount: 0.0 }),
-                enabled(ModuleParameters::TonalCurve),
+                enabled(ModuleParameters::TonalCurve {
+                    curves: crate::CurveSet::default(),
+                    mode: crate::CurveMode::LinkedRgb,
+                }),
+                enabled(ModuleParameters::LocalContrast {
+                    amount: 0.0,
+                    radius: 80.0,
+                }),
+                enabled(ModuleParameters::Saturation { amount: 0.0 }),
                 enabled(ModuleParameters::CreativeColour),
-                enabled(ModuleParameters::NoiseReduction),
                 enabled(ModuleParameters::Sharpening),
                 enabled(ModuleParameters::Resize),
                 enabled(ModuleParameters::OutputTransform),
@@ -167,6 +179,13 @@ impl Pipeline {
                     });
                 }
             }
+            module.validate_for_image(&image).map_err(|reason| {
+                PipelineError::InvalidParameters {
+                    module: module.kind(),
+                    module_index,
+                    reason,
+                }
+            })?;
             module
                 .apply(&mut image, self.snapshot.working_space, &cancellation)
                 .map_err(|()| cancellation_error(Some(module.kind()), Some(module_index)))?;
@@ -358,7 +377,7 @@ impl std::error::Error for PipelineError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CancellationToken, ImageContract};
+    use crate::{CancellationToken, CropSettings, ImageContract};
 
     #[test]
     fn default_modules_follow_the_documented_starting_order() {
@@ -375,10 +394,12 @@ mod tests {
                 ModuleKind::WhiteBalance,
                 ModuleKind::Exposure,
                 ModuleKind::HighlightsAndShadows,
+                ModuleKind::NoiseReduction,
                 ModuleKind::Contrast,
                 ModuleKind::TonalCurve,
+                ModuleKind::LocalContrast,
+                ModuleKind::Saturation,
                 ModuleKind::CreativeColour,
-                ModuleKind::NoiseReduction,
                 ModuleKind::Sharpening,
                 ModuleKind::Resize,
                 ModuleKind::OutputTransform,
@@ -395,14 +416,14 @@ mod tests {
             assert!((actual - expected).abs() < 1.0e-6);
         }
         assert_eq!(rendered.contract(), ImageContract::SRGB_DISPLAY);
-        assert_eq!(report.stages.len(), 13);
+        assert_eq!(report.stages.len(), 15);
         assert_eq!(
             report
                 .stages
                 .iter()
                 .filter(|stage| stage.status == RenderStageStatus::Processed)
                 .count(),
-            5
+            10
         );
         assert_eq!(
             report
@@ -410,7 +431,174 @@ mod tests {
                 .iter()
                 .filter(|stage| stage.status == RenderStageStatus::Placeholder)
                 .count(),
-            8
+            5
+        );
+    }
+
+    #[test]
+    fn default_pipeline_accepts_encoded_adobe_rgb_input() {
+        let source = Image::new(
+            1,
+            1,
+            vec![[0.5, 0.25, 0.75]],
+            ImageContract::ADOBE_RGB_CURVE,
+        )
+        .unwrap();
+        let (rendered, _) = Pipeline::default().render(source).unwrap();
+        assert_eq!(rendered.contract(), ImageContract::SRGB_DISPLAY);
+        assert!(
+            rendered.pixels()[0]
+                .iter()
+                .all(|channel| channel.is_finite())
+        );
+    }
+
+    #[test]
+    fn crop_changes_dimensions_without_mutating_the_source_image() {
+        let source = Image::new(4, 4, vec![[0.5; 3]; 16], ImageContract::SRGB_DISPLAY).unwrap();
+        let mut snapshot = Pipeline::default().snapshot();
+        let crop_module = snapshot
+            .modules
+            .iter_mut()
+            .find(|module| module.kind() == ModuleKind::OrientationAndCrop)
+            .unwrap();
+        crop_module.parameters = ModuleParameters::OrientationAndCrop {
+            crop: Some(CropSettings {
+                left: 0.25,
+                top: 0.25,
+                right: 0.75,
+                bottom: 0.75,
+                rotation_degrees: 0.0,
+            }),
+        };
+
+        let (cropped, _) = Pipeline::from_snapshot(snapshot)
+            .render(source.clone())
+            .unwrap();
+
+        assert_eq!([cropped.width(), cropped.height()], [2, 2]);
+        assert_eq!([source.width(), source.height()], [4, 4]);
+    }
+
+    #[test]
+    fn rotated_crop_must_remain_inside_the_original_image() {
+        let source = Image::new(4, 2, vec![[0.5; 3]; 8], ImageContract::SRGB_DISPLAY).unwrap();
+        let mut snapshot = Pipeline::default().snapshot();
+        let crop_module = snapshot
+            .modules
+            .iter_mut()
+            .find(|module| module.kind() == ModuleKind::OrientationAndCrop)
+            .unwrap();
+        crop_module.parameters = ModuleParameters::OrientationAndCrop {
+            crop: Some(CropSettings {
+                left: 0.0,
+                top: 0.0,
+                right: 1.0,
+                bottom: 1.0,
+                rotation_degrees: 10.0,
+            }),
+        };
+
+        assert!(matches!(
+            Pipeline::from_snapshot(snapshot).render(source),
+            Err(PipelineError::InvalidParameters {
+                module: ModuleKind::OrientationAndCrop,
+                reason: "crop rectangle extends beyond the original image after rotation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn crop_safety_can_be_checked_before_submitting_a_render() {
+        let full_rotated = CropSettings {
+            rotation_degrees: 15.0,
+            ..CropSettings::full_image()
+        };
+        assert!(!full_rotated.is_safe_for_aspect(3.0 / 2.0));
+        assert!(
+            CropSettings::largest_safe_straightened(3.0 / 2.0, 15.0).is_safe_for_aspect(3.0 / 2.0)
+        );
+    }
+
+    #[test]
+    fn making_rotation_safe_preserves_crop_centre_and_aspect_ratio() {
+        let crop = CropSettings {
+            left: 0.1,
+            top: 0.2,
+            right: 0.9,
+            bottom: 0.8,
+            rotation_degrees: 25.0,
+        };
+        let safe = crop.shrink_to_safe(3.0 / 2.0);
+
+        assert!(safe.is_safe_for_aspect(3.0 / 2.0));
+        assert!(((safe.left + safe.right) - (crop.left + crop.right)).abs() < 1.0e-6);
+        assert!(((safe.top + safe.bottom) - (crop.top + crop.bottom)).abs() < 1.0e-6);
+        let before = (crop.right - crop.left) / (crop.bottom - crop.top);
+        let after = (safe.right - safe.left) / (safe.bottom - safe.top);
+        assert!((before - after).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn default_pipeline_uses_the_adobe_rgb_mvp_working_contract() {
+        assert_eq!(
+            Pipeline::default()
+                .snapshot()
+                .working_space
+                .image_contract(),
+            ImageContract::LINEAR_ADOBE_RGB
+        );
+    }
+
+    #[test]
+    fn a_non_identity_tonal_curve_changes_the_rendered_pixel() {
+        let curve = crate::SmoothCurve::from_points(vec![
+            crate::CurvePoint { x: 0.0, y: 0.0 },
+            crate::CurvePoint { x: 0.5, y: 0.75 },
+            crate::CurvePoint { x: 1.0, y: 1.0 },
+        ])
+        .unwrap();
+        let curves = crate::CurveSet {
+            linked: curve,
+            ..crate::CurveSet::default()
+        };
+        let pipeline = Pipeline::from_snapshot(PipelineSnapshot {
+            version: PIPELINE_VERSION,
+            working_space: WorkingSpace::default(),
+            modules: vec![
+                enabled(ModuleParameters::InputTransform),
+                enabled(ModuleParameters::TonalCurve {
+                    curves,
+                    mode: crate::CurveMode::LinkedRgb,
+                }),
+                enabled(ModuleParameters::OutputTransform),
+            ],
+        });
+        let source = Image::new(1, 1, vec![[0.5; 3]], ImageContract::SRGB_DISPLAY).unwrap();
+        let (rendered, _) = pipeline.render(source).unwrap();
+        assert!(rendered.pixels()[0][0] > 0.6);
+    }
+
+    #[test]
+    fn output_transform_bounds_encoded_display_channels() {
+        let pipeline = Pipeline::from_snapshot(PipelineSnapshot {
+            version: PIPELINE_VERSION,
+            working_space: WorkingSpace::default(),
+            modules: vec![
+                enabled(ModuleParameters::InputTransform),
+                enabled(ModuleParameters::Exposure { stops: 4.0 }),
+                enabled(ModuleParameters::OutputTransform),
+            ],
+        });
+        let source = Image::new(1, 1, vec![[1.0, 0.0, 1.0]], ImageContract::SRGB_DISPLAY).unwrap();
+        let (rendered, _) = pipeline.render(source).unwrap();
+        assert!(
+            rendered
+                .pixels()
+                .iter()
+                .flatten()
+                .all(|value| (0.0..=1.0).contains(value))
         );
     }
 
@@ -447,17 +635,16 @@ mod tests {
     }
 
     #[test]
-    fn module_contract_checks_include_more_than_encoding() {
+    fn input_transform_rejects_linear_source_contracts() {
         let source = Image::new(1, 1, vec![[0.5; 3]], ImageContract::LINEAR_SRGB).unwrap();
         let error = Pipeline::default().render(source).unwrap_err();
 
         assert_eq!(
             error,
-            PipelineError::ContractMismatch {
+            PipelineError::InvalidParameters {
                 module: ModuleKind::InputTransform,
                 module_index: 0,
-                expected: ImageContract::SRGB_DISPLAY,
-                actual: ImageContract::LINEAR_SRGB,
+                reason: "input transform requires encoded sRGB or encoded Adobe RGB",
             }
         );
     }
@@ -545,12 +732,13 @@ mod tests {
     }
 
     #[test]
-    fn negative_white_balance_multipliers_are_rejected() {
+    fn out_of_range_white_balance_adjustments_are_rejected() {
         let pipeline = Pipeline::from_snapshot(PipelineSnapshot {
             version: PIPELINE_VERSION,
             working_space: WorkingSpace::default(),
             modules: vec![enabled(ModuleParameters::WhiteBalance {
-                multipliers: [1.0, -0.1, 1.0],
+                warmth: 100.1,
+                tint: 0.0,
             })],
         });
         let source = Image::new(1, 1, vec![[0.5; 3]], ImageContract::LINEAR_SRGB).unwrap();
@@ -560,7 +748,7 @@ mod tests {
             PipelineError::InvalidParameters {
                 module: ModuleKind::WhiteBalance,
                 module_index: 0,
-                reason: "white-balance multipliers must be finite and non-negative",
+                reason: "white-balance warmth must be between -100 and 100",
             }
         );
     }
@@ -587,7 +775,7 @@ mod tests {
         assert!(updates.first().unwrap().fraction.abs() < f32::EPSILON);
         assert_eq!(updates.first().unwrap().current_module, None);
         assert!((updates.last().unwrap().fraction - 1.0).abs() < f32::EPSILON);
-        assert_eq!(updates.last().unwrap().completed_stages, 13);
+        assert_eq!(updates.last().unwrap().completed_stages, 15);
         assert!(updates.iter().any(|update| {
             update.current_module == Some(ModuleKind::Exposure)
                 && update.current_module_index == Some(3)
@@ -604,7 +792,7 @@ mod tests {
         let pipeline = Pipeline::from_snapshot(PipelineSnapshot {
             version: PIPELINE_VERSION,
             working_space: WorkingSpace::default(),
-            modules: vec![enabled(ModuleParameters::OrientationAndCrop)],
+            modules: vec![enabled(ModuleParameters::OrientationAndCrop { crop: None })],
         });
         let source = Image::new(1, 1, vec![[0.5; 3]], ImageContract::SRGB_DISPLAY).unwrap();
         let mut updates = Vec::new();
@@ -765,7 +953,7 @@ mod tests {
         let pipeline = Pipeline::from_snapshot(PipelineSnapshot {
             version: PIPELINE_VERSION,
             working_space: WorkingSpace::default(),
-            modules: vec![enabled(ModuleParameters::OrientationAndCrop)],
+            modules: vec![enabled(ModuleParameters::OrientationAndCrop { crop: None })],
         });
         let source = Image::new(1, 1, vec![[0.5; 3]], ImageContract::SRGB_DISPLAY).unwrap();
         let token = CancellationToken::new();

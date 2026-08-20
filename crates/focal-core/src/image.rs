@@ -12,6 +12,8 @@ pub enum ChannelMeaning {
 pub enum ColourEncoding {
     /// The standard sRGB piecewise transfer function.
     Srgb,
+    /// The Adobe RGB (1998) gamma encoding used by the bounded MVP curve.
+    AdobeRgb,
     /// Scene-linear light. Values are not restricted to display range.
     Linear,
 }
@@ -19,6 +21,7 @@ pub enum ColourEncoding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Primaries {
     Srgb,
+    AdobeRgb,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +49,18 @@ impl ImageContract {
     pub const LINEAR_SRGB: Self = Self {
         encoding: ColourEncoding::Linear,
         ..Self::SRGB_DISPLAY
+    };
+
+    pub const ADOBE_RGB_CURVE: Self = Self {
+        channels: ChannelMeaning::Rgb,
+        encoding: ColourEncoding::AdobeRgb,
+        primaries: Primaries::AdobeRgb,
+        white_point: WhitePoint::D65,
+    };
+
+    pub const LINEAR_ADOBE_RGB: Self = Self {
+        encoding: ColourEncoding::Linear,
+        ..Self::ADOBE_RGB_CURVE
     };
 }
 
@@ -91,6 +106,14 @@ impl Image {
         if pixels.iter().flatten().any(|value| !value.is_finite()) {
             return Err(ImageError::NonFinitePixel);
         }
+        if contract.encoding != ColourEncoding::Linear
+            && pixels
+                .iter()
+                .flatten()
+                .any(|value| !(0.0..=1.0).contains(value))
+        {
+            return Err(ImageError::OutOfRangeEncodedPixel);
+        }
         Ok(Self {
             width,
             height,
@@ -134,6 +157,7 @@ pub enum ImageError {
     ZeroDimension,
     PixelCount { expected: usize, actual: usize },
     NonFinitePixel,
+    OutOfRangeEncodedPixel,
 }
 
 impl fmt::Display for ImageError {
@@ -147,6 +171,12 @@ impl fmt::Display for ImageError {
                 write!(formatter, "expected {expected} pixels, received {actual}")
             }
             Self::NonFinitePixel => write!(formatter, "image contains a non-finite channel value"),
+            Self::OutOfRangeEncodedPixel => {
+                write!(
+                    formatter,
+                    "encoded image channels must be between zero and one"
+                )
+            }
         }
     }
 }
@@ -181,6 +211,23 @@ mod tests {
         assert_eq!(
             Image::new(1, 1, vec![[f32::NAN; 3]], ImageContract::SRGB_DISPLAY).unwrap_err(),
             ImageError::NonFinitePixel
+        );
+    }
+
+    #[test]
+    fn encoded_contracts_are_bounded_but_linear_contracts_are_not() {
+        assert_eq!(
+            Image::new(1, 1, vec![[1.01, 0.0, 0.0]], ImageContract::SRGB_DISPLAY,).unwrap_err(),
+            ImageError::OutOfRangeEncodedPixel
+        );
+        assert!(
+            Image::new(
+                1,
+                1,
+                vec![[1.01, -0.01, 0.0]],
+                ImageContract::LINEAR_ADOBE_RGB,
+            )
+            .is_ok()
         );
     }
 }

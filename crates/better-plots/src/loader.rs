@@ -8,7 +8,11 @@ use std::{
     },
 };
 
-use image::{ImageDecoder, ImageFormat, codecs::jpeg::JpegDecoder, metadata::Orientation};
+use image::{
+    ImageDecoder, ImageFormat,
+    codecs::{jpeg::JpegDecoder, png::PngDecoder},
+    metadata::Orientation,
+};
 
 use better_plots::vectorscope::{
     AnalysisRegion, DensityScale, SCOPE_RESOLUTION, ScopeSpace, VectorscopeAnalysis, analyse,
@@ -295,18 +299,21 @@ fn load_image(path: &Path) -> Result<LoadedImage, String> {
         .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
     let format = image::guess_format(&bytes)
         .map_err(|error| format!("Could not identify {}: {error}", path.display()))?;
-    let orientation = if format == ImageFormat::Jpeg {
-        let mut decoder = JpegDecoder::new(Cursor::new(&bytes))
-            .map_err(|error| format!("Could not decode {}: {error}", path.display()))?;
-        decoder.orientation().map_err(|error| {
-            format!(
-                "Could not read orientation from {}: {error}",
-                path.display()
-            )
-        })?
-    } else {
-        Orientation::NoTransforms
+    let orientation = match format {
+        ImageFormat::Jpeg => JpegDecoder::new(Cursor::new(&bytes))
+            .map_err(|error| format!("Could not decode {}: {error}", path.display()))?
+            .orientation(),
+        ImageFormat::Png => PngDecoder::new(Cursor::new(&bytes))
+            .map_err(|error| format!("Could not decode {}: {error}", path.display()))?
+            .orientation(),
+        _ => Ok(Orientation::NoTransforms),
     };
+    let orientation = orientation.map_err(|error| {
+        format!(
+            "Could not read orientation from {}: {error}",
+            path.display()
+        )
+    })?;
     let mut decoded = image::load_from_memory_with_format(&bytes, format)
         .map_err(|error| format!("Could not decode {}: {error}", path.display()))?;
     decoded.apply_orientation(orientation);
@@ -330,7 +337,10 @@ fn load_image(path: &Path) -> Result<LoadedImage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgb, codecs::jpeg::JpegEncoder};
+    use image::{
+        ExtendedColorType, ImageBuffer, ImageEncoder, Rgb,
+        codecs::{jpeg::JpegEncoder, png::PngEncoder},
+    };
     use std::{thread, time::Duration};
 
     fn tiny_image() -> Arc<LoadedImage> {
@@ -460,5 +470,34 @@ mod tests {
             (1, 2),
             "the displayed image and its scope must use the EXIF display orientation"
         );
+    }
+
+    #[test]
+    fn png_exif_orientation_is_applied_before_scope_analysis() {
+        let pixels = [255_u8, 0, 0, 0, 0, 255];
+        let tiff = [
+            b'I', b'I', 42, 0, 8, 0, 0, 0, // TIFF header and IFD offset
+            1, 0, // one IFD entry
+            0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, // rotate 90° clockwise
+            0, 0, 0, 0, // next IFD
+        ];
+        let mut png = Vec::new();
+        let mut encoder = PngEncoder::new(&mut png);
+        encoder
+            .set_exif_metadata(tiff.to_vec())
+            .expect("PNG encoder accepts eXIf metadata");
+        encoder
+            .write_image(&pixels, 2, 1, ExtendedColorType::Rgb8)
+            .expect("encode PNG fixture");
+
+        let path = std::env::temp_dir().join(format!(
+            "better-plots-png-orientation-regression-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, png).expect("write temporary PNG fixture");
+        let loaded = load_image(&path).expect("oriented PNG decodes");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!((loaded.width, loaded.height), (1, 2));
     }
 }

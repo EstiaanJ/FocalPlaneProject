@@ -1,13 +1,14 @@
 //! Curve evaluation independent of egui.
 //!
-//! The curve domain is display-referred, normalised, sRGB-like encoding:
-//! `0.0` is encoded black and `1.0` is encoded white. It is deliberately not
-//! a scene-linear or unbounded RAW domain.
+//! The curve domain is canonical encoded Adobe RGB (1998): `0.0` is encoded
+//! black and `1.0` is encoded white. It is deliberately not a scene-linear or
+//! unbounded RAW domain.
 
 #![allow(clippy::cast_precision_loss)]
 
 const MIN_X_GAP: f32 = 0.008;
 const MIN_INSERT_GAP: f32 = 0.012;
+pub const CURVE_DOMAIN_LABEL: &str = "canonical encoded Adobe RGB (1998)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CurveMode {
@@ -57,15 +58,17 @@ impl CurveChannel {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LuminanceDefinition {
+    AdobeRgb,
     Rec709,
     EqualEnergy,
 }
 
 impl LuminanceDefinition {
-    pub const ALL: [Self; 2] = [Self::Rec709, Self::EqualEnergy];
+    pub const ALL: [Self; 3] = [Self::AdobeRgb, Self::Rec709, Self::EqualEnergy];
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::AdobeRgb => "Adobe RGB (1998)",
             Self::Rec709 => "Rec. 709",
             Self::EqualEnergy => "Equal energy",
         }
@@ -129,6 +132,29 @@ impl BezierHandles {
         match kind {
             BezierHandleKind::Incoming => self.incoming = value,
             BezierHandleKind::Outgoing => self.outgoing = value,
+        }
+    }
+}
+
+fn order_segment_handle_x(handles: &mut [BezierHandles]) {
+    for segment in 0..handles.len().saturating_sub(1) {
+        let (left, right) = handles.split_at_mut(segment + 1);
+        let Some(outgoing) = left[segment].outgoing else {
+            continue;
+        };
+        let Some(incoming) = right[0].incoming else {
+            continue;
+        };
+        if outgoing.x > incoming.x {
+            let middle = (outgoing.x + incoming.x) * 0.5;
+            left[segment].outgoing = Some(ControlPoint {
+                x: middle,
+                ..outgoing
+            });
+            right[0].incoming = Some(ControlPoint {
+                x: middle,
+                ..incoming
+            });
         }
     }
 }
@@ -580,6 +606,7 @@ impl Curve {
         for index in 1..self.points.len().saturating_sub(1) {
             self.align_handle_pair(index, None);
         }
+        order_segment_handle_x(&mut self.bezier_handles);
     }
 
     fn normalise_handle_positions(&mut self) {
@@ -606,6 +633,7 @@ impl Curve {
                 self.bezier_handles[index].set(kind, Some(handle));
             }
         }
+        order_segment_handle_x(&mut self.bezier_handles);
     }
 
     fn align_handle_pair(&mut self, index: usize, preferred: Option<BezierHandleKind>) {
@@ -699,8 +727,19 @@ impl DerivativeCurve {
         &self.points
     }
 
-    pub fn points_mut(&mut self) -> &mut [ControlPoint] {
-        &mut self.points
+    pub fn set_point_y_near(&mut self, x: f32, y: f32, tolerance: f32) -> bool {
+        if !x.is_finite() || !y.is_finite() || !tolerance.is_finite() || tolerance < 0.0 {
+            return false;
+        }
+        let Some(point) = self
+            .points
+            .iter_mut()
+            .find(|point| (point.x - x).abs() < tolerance)
+        else {
+            return false;
+        };
+        point.y = y;
+        true
     }
 
     pub fn bezier_handles(&self) -> &[BezierHandles] {
@@ -968,6 +1007,7 @@ impl DerivativeCurve {
         for index in 1..self.points.len().saturating_sub(1) {
             self.align_handle_pair(index, None);
         }
+        order_segment_handle_x(&mut self.bezier_handles);
     }
 
     fn normalise_handle_positions(&mut self) {
@@ -994,6 +1034,7 @@ impl DerivativeCurve {
                 self.bezier_handles[index].set(kind, Some(handle));
             }
         }
+        order_segment_handle_x(&mut self.bezier_handles);
     }
 
     fn align_handle_pair(&mut self, index: usize, preferred: Option<BezierHandleKind>) {
@@ -1288,11 +1329,7 @@ impl CurveSet {
                     .evaluate_with_interpolation(luminance, interpolation);
                 if luminance > 0.0 {
                     let scale = adjusted / luminance;
-                    [
-                        (rgb[0] * scale).clamp(0.0, 1.0),
-                        (rgb[1] * scale).clamp(0.0, 1.0),
-                        (rgb[2] * scale).clamp(0.0, 1.0),
-                    ]
+                    [rgb[0] * scale, rgb[1] * scale, rgb[2] * scale]
                 } else {
                     [adjusted, adjusted, adjusted]
                 }
@@ -1302,11 +1339,14 @@ impl CurveSet {
 }
 
 pub fn luma(rgb: [f32; 3]) -> f32 {
-    luma_with_definition(rgb, LuminanceDefinition::Rec709)
+    luma_with_definition(rgb, LuminanceDefinition::AdobeRgb)
 }
 
 pub fn luma_with_definition(rgb: [f32; 3], definition: LuminanceDefinition) -> f32 {
     let value = match definition {
+        LuminanceDefinition::AdobeRgb => {
+            0.297_355 * rgb[0] + 0.627_372 * rgb[1] + 0.075_273 * rgb[2]
+        }
         LuminanceDefinition::Rec709 => 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2],
         LuminanceDefinition::EqualEnergy => (rgb[0] + rgb[1] + rgb[2]) / 3.0,
     };
@@ -1316,8 +1356,8 @@ pub fn luma_with_definition(rgb: [f32; 3], definition: LuminanceDefinition) -> f
 #[cfg(test)]
 mod tests {
     use super::{
-        BezierHandleKind, ControlPoint, Curve, CurveChannel, CurveInterpolation, CurveMode,
-        CurveSet, DerivativeCurve, LuminanceDefinition,
+        BezierHandleKind, CURVE_DOMAIN_LABEL, ControlPoint, Curve, CurveChannel,
+        CurveInterpolation, CurveMode, CurveSet, DerivativeCurve, LuminanceDefinition,
     };
 
     #[test]
@@ -1502,6 +1542,67 @@ mod tests {
                 assert!(value <= pair[0].y.max(pair[1].y) + 1e-5);
             }
         }
+    }
+
+    #[test]
+    fn luma_adjustment_preserves_channel_ratios_before_output_conversion() {
+        let curves = CurveSet {
+            luminance: Curve::from_points(vec![
+                ControlPoint { x: 0.0, y: 0.0 },
+                ControlPoint { x: 0.5, y: 0.9 },
+                ControlPoint { x: 1.0, y: 1.0 },
+            ])
+            .unwrap(),
+            ..CurveSet::default()
+        };
+        let input = [1.0, 0.5, 0.25];
+        let output = curves.apply_with_luminance_and_interpolation(
+            CurveMode::Luminance,
+            input,
+            LuminanceDefinition::AdobeRgb,
+            CurveInterpolation::Linear,
+        );
+        assert!((output[0] / output[1] - 2.0).abs() < 1e-5);
+        assert!((output[1] / output[2] - 2.0).abs() < 1e-5);
+        assert!(
+            output[0] > 1.0,
+            "ratio preservation must precede gamut handling"
+        );
+    }
+
+    #[test]
+    fn derivative_point_updates_reject_non_finite_values() {
+        let mut derivative = Curve::identity().derivative_curve(CurveInterpolation::Smooth);
+        let before = derivative.points().to_vec();
+        assert!(!derivative.set_point_y_near(0.5, f32::NAN, 1e-5));
+        assert_eq!(derivative.points(), before);
+    }
+
+    #[test]
+    fn bezier_segment_handles_remain_ordered_on_x() {
+        let curve = Curve::identity();
+        let moved_outgoing =
+            Curve::dragged_handle_from(&curve, 1, BezierHandleKind::Outgoing, 0.49, 0.25);
+        let moved_both =
+            Curve::dragged_handle_from(&moved_outgoing, 2, BezierHandleKind::Incoming, 0.26, 0.5);
+        let outgoing = moved_both.handle(1, BezierHandleKind::Outgoing).unwrap();
+        let incoming = moved_both.handle(2, BezierHandleKind::Incoming).unwrap();
+        assert!(outgoing.x <= incoming.x);
+    }
+
+    #[test]
+    fn curve_domain_contract_names_adobe_rgb() {
+        assert_eq!(CURVE_DOMAIN_LABEL, "canonical encoded Adobe RGB (1998)");
+    }
+
+    #[test]
+    fn adobe_rgb_luma_uses_the_project_coefficients() {
+        let red = super::luma_with_definition([1.0, 0.0, 0.0], LuminanceDefinition::AdobeRgb);
+        let green = super::luma_with_definition([0.0, 1.0, 0.0], LuminanceDefinition::AdobeRgb);
+        let blue = super::luma_with_definition([0.0, 0.0, 1.0], LuminanceDefinition::AdobeRgb);
+        assert!((red - 0.297_355).abs() < 1e-6);
+        assert!((green - 0.627_372).abs() < 1e-6);
+        assert!((blue - 0.075_273).abs() < 1e-6);
     }
 
     #[test]

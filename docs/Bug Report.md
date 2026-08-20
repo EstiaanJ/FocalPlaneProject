@@ -125,3 +125,60 @@ currently visible items, biases the spare viewport toward the available
 scroll direction near either end, and requests a new window as the filmstrip
 scrolls. `filmstrip_prefetches_twice_the_visible_thumbnail_count` protects
 that policy.
+
+# Bug report — 2026-08-19 comprehensive correctness pass
+
+This pass records 30 new issues independently verified through
+`docs/inter-agent-comms.md`. Candidates 003, 013, 017, 019, and 035 were
+declined; candidates 006, 009, and 016 duplicate concerns already present in
+the earlier ledger and are not counted again. All entries below are corrected,
+and their named tests remain active regressions.
+
+| ID | Area | Problem | Regression test |
+| --- | --- | --- | --- |
+| FP-AUDIT-001 | FocalCore | The pipeline cannot represent the canonical encoded Adobe RGB MVP curve domain. | `pipeline::tests::default_pipeline_uses_the_adobe_rgb_mvp_working_contract` |
+| FP-AUDIT-002 | FocalCore | The enabled tonal-curve module is parameterless and does no processing. | `pipeline::tests::a_non_identity_tonal_curve_changes_the_rendered_pixel` |
+| FP-AUDIT-004 | FocalCore | Output transform publishes negative or above-one display values. | `pipeline::tests::output_transform_bounds_encoded_display_channels` |
+| FP-AUDIT-005 | FocalCore scope | Empty buffers with zero dimensions are accepted. | `scope::tests::invalid_analysis_boundaries_are_rejected` |
+| FP-AUDIT-007 | FocalPlot | Completed asynchronous analysis may remain unpolled without another repaint. | `app::tests::pending_analysis_keeps_event_polling_alive` |
+| FP-AUDIT-008 | FocalPlot | PNG eXIf orientation is ignored. | `loader::tests::png_exif_orientation_is_applied_before_scope_analysis` |
+| FP-AUDIT-010 | FocalCurve | Cancellation raised by the final progress callback still publishes a preview. | `pipeline::tests::final_progress_cancellation_does_not_publish_a_preview` |
+| FP-AUDIT-011 | FocalPlot | Rendering a public zero-resolution scope can underflow or panic. | `vectorscope::tests::trace_rendering_rejects_invalid_public_analysis_shapes` |
+| FP-AUDIT-012 | FocalPlot | Scope rendering trusts density/colour lengths and can panic. | `vectorscope::tests::trace_rendering_rejects_invalid_public_analysis_shapes` |
+| FP-AUDIT-014 | FocalPlot | Reverse-highlight cancellation is checked only once per row. | `vectorscope::tests::a_wide_single_row_reverse_scan_observes_cancellation` |
+| FP-AUDIT-015 | FocalPlot | Scrolling unrelated UI changes the scope search radius. | `app::tests::scope_scroll_is_ignored_when_the_scope_is_not_hovered` |
+| FP-AUDIT-018 | FocalCurve | Decode discards alpha before applying the decided transparency policy. | `pipeline::tests::transparent_input_requires_confirmation_and_can_flatten_over_white` |
+| FP-AUDIT-020 | FocalCurve | EXIF ColorSpace parsing ignores the TIFF count field. | `pipeline::tests::malformed_exif_colour_space_count_is_rejected` |
+| FP-AUDIT-021 | FocalCurve | Public source/prepared dimensions can disagree with their buffers. | `pipeline::tests::preparation_rejects_inconsistent_and_non_finite_source_pixels` |
+| FP-AUDIT-022 | FocalCurve | Superseded image decode/preparation monopolises the worker. | `loader::tests::an_active_obsolete_request_does_not_block_a_new_request` |
+| FP-AUDIT-023 | FocalCurve | Export errors are silent and a fixed relative path may be overwritten. | `pipeline::tests::explicit_export_destination_reports_filesystem_errors` |
+| FP-AUDIT-024 | FocalCurve | Luma scaling clips channels independently and changes their ratios before output conversion. | `curve::tests::luma_adjustment_preserves_channel_ratios_before_output_conversion` |
+| FP-AUDIT-025 | FocalCurve | Mutable derivative points can violate established invariants. | `curve::tests::derivative_point_updates_reject_non_finite_values` |
+| FP-AUDIT-026 | FocalCurve | Bezier handles can make segment X non-monotonic while evaluation assumes monotonicity. | `curve::tests::bezier_segment_handles_remain_ordered_on_x` |
+| FP-AUDIT-027 | FocalCore | Display-encoded `Image` values are not constrained to their bounded contract. | `image::tests::encoded_contracts_are_bounded_but_linear_contracts_are_not` |
+| FP-AUDIT-028 | FocalCore scope | Scope analysis accepts unlabelled bytes and silently assumes sRGB. | `scope::tests::scope_analysis_requires_an_explicit_srgb_byte_contract` |
+| FP-AUDIT-029 | FocalCore scope | Forward scope analysis cannot cooperatively cancel. | `scope::tests::forward_and_reverse_scans_observe_preexisting_cancellation` |
+| FP-AUDIT-030 | FocalPlot | Trace intensity and sharpness accept non-finite values. | `vectorscope::tests::trace_rendering_rejects_non_finite_presentation_parameters` |
+| FP-AUDIT-031 | FocalCurve | Luma choices omit the required Adobe RGB coefficients. | `curve::tests::adobe_rgb_luma_uses_the_project_coefficients` |
+| FP-AUDIT-032 | FocalCore scope | Reverse-highlight analysis cannot cooperatively cancel. | `scope::tests::forward_and_reverse_scans_observe_preexisting_cancellation` |
+| FP-AUDIT-033 | FocalCurve | Preparation accepts non-finite source pixels and can quantise NaN to plausible bytes. | `pipeline::tests::preparation_rejects_inconsistent_and_non_finite_source_pixels` |
+| FP-AUDIT-034 | FocalCore scope | Independently fitted RGB↔RYB splines are not an inverse pair between knots. | `scope::tests::ryb_mapping_round_trips_between_knots` |
+| FP-AUDIT-036 | FocalCurve | Curve documentation incorrectly calls the Adobe RGB domain sRGB-like. | `curve::tests::curve_domain_contract_names_adobe_rgb` |
+| FP-AUDIT-037 | FocalCurve | Histograms use Rec. 709 coefficients for encoded Adobe RGB samples. | `pipeline::tests::histograms_use_adobe_rgb_luma_for_the_canonical_curve_domain` |
+| FP-AUDIT-038 | FocalCurve | Invalidating a preview does not immediately cancel its active worker. | `preview::tests::invalidating_a_preview_signals_its_active_cancellation_token` |
+
+# Bug report — 2026-08-20 Phase One completion
+
+The Phase One completion pass corrected the following editor defects. The named tests are active regressions in the ordinary workspace suite.
+
+| ID | Severity | Confirmed defect | Regression test |
+| --- | --- | --- | --- |
+| FP-EDITOR-007 | High | A completion from the previous photograph could be accepted after opening a new photograph, briefly re-enabling export for stale pixels. | `app::tests::opening_another_image_invalidates_in_flight_preview_and_export_state` |
+| FP-EDITOR-008 | High | Zoom enlarged a fixed one-megapixel proxy instead of resampling the visible full-resolution source region. | `app::tests::zoom_sampling_uses_the_visible_region_and_never_exceeds_one_megapixel`, `preview::tests::preview_sampling_extracts_only_the_requested_source_region` |
+| FP-EDITOR-009 | High | Full-resolution export processing and encoding ran synchronously on the GUI thread. | `app::tests::export_requires_pixels_from_the_current_completed_render`, `image_io::tests::png_export_embeds_an_srgb_icc_profile` |
+| FP-EDITOR-010 | Medium | FocalEditor used FocalPlot's duplicate numerical scope analyser and active scope work could not be cancelled. | `scope::tests::submitting_a_new_scope_cancels_the_active_scan` |
+| FP-EDITOR-011 | Medium | JPEG/PNG orientation and embedded ICC profiles were ignored, and 16-bit alpha was quantised before transparency detection. | `image_io::tests::png_orientation_is_applied_exactly_once_at_decode`, `image_io::tests::embedded_adobe_rgb_profile_enters_core_with_an_adobe_contract`, `image_io::tests::sixteen_bit_alpha_is_not_quantised_before_transparency_detection` |
+| FP-EDITOR-012 | Medium | Re-entering crop editing could display the previously cropped texture under source-relative handles, and export could apply an unconfirmed crop. | `app::tests::crop_is_excluded_from_render_snapshot_until_finalised`, `preview::tests::applied_crop_sampling_maps_the_visible_crop_region_back_to_the_source` |
+| FP-EDITOR-013 | Low | Failed thumbnail requests remained permanently marked as requested and could never retry. | `app::tests::failed_thumbnail_decode_becomes_retryable` |
+
+Interactive preview preparation, histograms, processing, scopes, and export now stay off the GUI thread. Preview sampling uses the visible source region, native source detail where available, and a one-megapixel upper bound; full-resolution processing is reserved for export.

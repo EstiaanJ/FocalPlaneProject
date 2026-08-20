@@ -2,7 +2,10 @@
     clippy::assigning_clones,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::fn_params_excessive_bools,
+    clippy::struct_excessive_bools,
+    clippy::too_many_lines
 )]
 
 use std::{
@@ -17,27 +20,30 @@ use std::{
 use eframe::egui::{
     self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
 };
-use focal_core::Image;
-use focal_plot::vectorscope::{CIE1931_LOCUS, DensityScale, ScopeSpace, render_trace, ring_colour};
+use focal_core::{CropSettings, Image, PIPELINE_VERSION};
+use focal_plot::vectorscope::{
+    CIE1931_LOCUS, DensityScale, ScopeSpace, VectorscopeAnalysis, render_trace, ring_colour,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     image_io::{
-        self, DecodedImage, LoadRequest, LoadResult, Thumbnail, ThumbnailRequest, ThumbnailResult,
+        self, DecodedImage, ExportRequest, ExportResult, LoadOperation, LoadRequest, LoadResult,
+        Thumbnail, ThumbnailRequest, ThumbnailResult,
     },
-    preview::{self, PreviewEvent, PreviewRequest, PreviewWorker},
+    preview::{self, Adjustments, PreviewEvent, PreviewRequest, PreviewSampling, PreviewWorker},
     scope::{self, ScopeRequest, ScopeResult},
 };
 
-const EDIT_STATE_VERSION: u32 = 1;
-const PIPELINE_VERSION: u32 = 1;
+const EDIT_STATE_VERSION: u32 = 3;
 const PREVIEW_BACKGROUND: Color32 = Color32::from_rgb(12, 13, 15);
 const PANEL_BACKGROUND: Color32 = Color32::from_rgb(24, 26, 29);
 const ACCENT: Color32 = Color32::from_rgb(117, 181, 230);
 const LEFT_RAIL_WIDTH: f32 = 190.0;
 const RIGHT_RAIL_WIDTH: f32 = 330.0;
 const FILMSTRIP_HEIGHT: f32 = 132.0;
-const TOOLBAR_HEIGHT: f32 = 38.0;
+const TOOLBAR_HEIGHT: f32 = 48.0;
+const PREVIEW_MAX_PIXELS: usize = 1_000_000;
 // A deliberately generous hit target keeps the splitters usable at dense
 // desktop sizes. The painted centre line remains subtle, but the whole strip
 // can be grabbed with the pointer.
@@ -51,6 +57,43 @@ enum ScopeTab {
     Ryb,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EditorTab {
+    #[default]
+    MainPhoto,
+    BeforeAfter,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CropMode {
+    #[default]
+    Inactive,
+    Editing,
+    Applied,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AspectLock {
+    #[default]
+    Free,
+    Locked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PreviewView {
+    zoom: f32,
+    pan: Vec2,
+}
+
+impl Default for PreviewView {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: Vec2::ZERO,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 struct EditSidecar {
     format: String,
@@ -59,6 +102,14 @@ struct EditSidecar {
     source_path: String,
     exposure_stops: f32,
     contrast: f32,
+    warmth: f32,
+    tint: f32,
+    local_contrast_amount: f32,
+    local_contrast_radius: f32,
+    saturation: f32,
+    noise_luminance: f32,
+    noise_colour: f32,
+    crop: Option<CropSettings>,
 }
 
 struct FilmStripItem {
@@ -73,9 +124,11 @@ pub struct FocalEditorApp {
     load_receiver: Receiver<LoadResult>,
     thumbnail_sender: Sender<ThumbnailRequest>,
     thumbnail_receiver: Receiver<ThumbnailResult>,
+    export_sender: Sender<ExportRequest>,
+    export_receiver: Receiver<ExportResult>,
     preview_worker: PreviewWorker,
     preview_receiver: Receiver<PreviewEvent>,
-    scope_sender: Sender<ScopeRequest>,
+    scope_worker: scope::ScopeWorker,
     scope_receiver: Receiver<ScopeResult>,
     next_generation: u64,
     latest_load_generation: u64,
@@ -84,11 +137,14 @@ pub struct FocalEditorApp {
     pending_thumbnails: usize,
     loading: bool,
     rendering: bool,
+    exporting: bool,
     scoping: bool,
     render_progress: f32,
     source_path: Option<PathBuf>,
     source: Option<DecodedImage>,
     source_core: Option<Arc<Image>>,
+    preview_sampling: PreviewSampling,
+    texture_sampling: PreviewSampling,
     output: Option<Image>,
     output_generation: Option<u64>,
     source_texture: Option<TextureHandle>,
@@ -97,9 +153,26 @@ pub struct FocalEditorApp {
     sidecar_path: Option<PathBuf>,
     exposure_stops: f32,
     contrast: f32,
+    warmth: f32,
+    tint: f32,
+    local_contrast_amount: f32,
+    local_contrast_radius: f32,
+    saturation: f32,
+    noise_luminance: f32,
+    noise_colour: f32,
+    crop: Option<CropSettings>,
+    crop_mode: CropMode,
+    crop_aspect_x: f32,
+    crop_aspect_y: f32,
+    crop_aspect_lock: AspectLock,
     source_histogram: Option<Histogram>,
     output_histogram: Option<Histogram>,
     scope_tab: ScopeTab,
+    scope_density_scale: DensityScale,
+    histogram_density_scale: DensityScale,
+    latest_scope_result: Option<ScopeResult>,
+    editor_tab: EditorTab,
+    preview_view: PreviewView,
     cie_scope_texture: Option<TextureHandle>,
     ryb_scope_texture: Option<TextureHandle>,
     film_strip: Vec<FilmStripItem>,
@@ -108,6 +181,7 @@ pub struct FocalEditorApp {
     filmstrip_height: f32,
     navigator_height: f32,
     histogram_height: f32,
+    last_export_directory: Option<PathBuf>,
     status: String,
 }
 
@@ -117,16 +191,19 @@ impl FocalEditorApp {
         configure_visuals(context);
         let (load_sender, load_receiver) = image_io::spawn_loader();
         let (thumbnail_sender, thumbnail_receiver) = image_io::spawn_thumbnail_loader();
+        let (export_sender, export_receiver) = image_io::spawn_exporter();
         let (preview_worker, preview_receiver) = preview::spawn();
-        let (scope_sender, scope_receiver) = scope::spawn();
+        let (scope_worker, scope_receiver) = scope::spawn();
         let mut app = Self {
             load_sender,
             load_receiver,
             thumbnail_sender,
             thumbnail_receiver,
+            export_sender,
+            export_receiver,
             preview_worker,
             preview_receiver,
-            scope_sender,
+            scope_worker,
             scope_receiver,
             next_generation: 0,
             latest_load_generation: 0,
@@ -135,11 +212,14 @@ impl FocalEditorApp {
             pending_thumbnails: 0,
             loading: false,
             rendering: false,
+            exporting: false,
             scoping: false,
             render_progress: 0.0,
             source_path: None,
             source: None,
             source_core: None,
+            preview_sampling: PreviewSampling::full(1, 1),
+            texture_sampling: PreviewSampling::full(1, 1),
             output: None,
             output_generation: None,
             source_texture: None,
@@ -148,9 +228,26 @@ impl FocalEditorApp {
             sidecar_path: None,
             exposure_stops: 0.0,
             contrast: 0.0,
+            warmth: 0.0,
+            tint: 0.0,
+            local_contrast_amount: 0.0,
+            local_contrast_radius: 80.0,
+            saturation: 0.0,
+            noise_luminance: 0.0,
+            noise_colour: 0.0,
+            crop: None,
+            crop_mode: CropMode::Inactive,
+            crop_aspect_x: 3.0,
+            crop_aspect_y: 2.0,
+            crop_aspect_lock: AspectLock::Free,
             source_histogram: None,
             output_histogram: None,
             scope_tab: ScopeTab::default(),
+            scope_density_scale: DensityScale::Logarithmic,
+            histogram_density_scale: DensityScale::Linear,
+            latest_scope_result: None,
+            editor_tab: EditorTab::default(),
+            preview_view: PreviewView::default(),
             cie_scope_texture: None,
             ryb_scope_texture: None,
             film_strip: Vec::new(),
@@ -159,6 +256,7 @@ impl FocalEditorApp {
             filmstrip_height: FILMSTRIP_HEIGHT,
             navigator_height: 170.0,
             histogram_height: 185.0,
+            last_export_directory: None,
             status: "Ready — open a PNG or JPEG to begin".to_owned(),
         };
 
@@ -170,19 +268,24 @@ impl FocalEditorApp {
 
     fn open_path(&mut self, path: PathBuf) {
         self.preview_worker.cancel();
+        self.scope_worker.cancel();
         self.next_generation = self.next_generation.saturating_add(1);
         self.latest_load_generation = self.next_generation;
+        // Invalidate every result belonging to the previously selected image.
+        // A cancelled worker can still have a completion event in flight.
+        self.latest_generation = self.next_generation;
         self.prepare_film_strip(&path);
         self.loading = true;
         self.rendering = false;
         self.output_generation = None;
+        self.output = None;
         self.pending_transparency = None;
         self.status = format!("Opening {}…", path.display());
         if self
             .load_sender
             .send(LoadRequest {
                 generation: self.latest_load_generation,
-                path,
+                operation: LoadOperation::Decode(path),
             })
             .is_err()
         {
@@ -243,6 +346,7 @@ impl FocalEditorApp {
             }
             self.pending_thumbnails = self.pending_thumbnails.saturating_sub(1);
             let Ok(thumbnail) = result.image else {
+                mark_thumbnail_failed(&mut self.film_strip, &result.path);
                 continue;
             };
             let Some(item) = self
@@ -274,16 +378,29 @@ impl FocalEditorApp {
                     self.rendering = false;
                     self.render_progress = 1.0;
                     match image {
-                        Ok(image) => {
+                        Ok(frame) => {
+                            self.texture_sampling = frame.sampling;
+                            let image = frame.after;
+                            self.source_texture = Some(context.load_texture(
+                                format!("focal-editor-before-{generation}"),
+                                rgba_image(
+                                    frame.before.pixels(),
+                                    frame.before.width(),
+                                    frame.before.height(),
+                                ),
+                                preview_texture_options(&frame.before, self.source.as_ref()),
+                            ));
+                            self.source_histogram =
+                                Some(Histogram::from_pixels(frame.before.pixels()));
                             self.output_histogram = Some(Histogram::from_pixels(image.pixels()));
                             self.output_texture = Some(context.load_texture(
                                 format!("focal-editor-after-{generation}"),
                                 rgba_image(image.pixels(), image.width(), image.height()),
-                                egui::TextureOptions::LINEAR,
+                                preview_texture_options(&image, self.source.as_ref()),
                             ));
                             self.scoping = self
-                                .scope_sender
-                                .send(ScopeRequest {
+                                .scope_worker
+                                .submit(ScopeRequest {
                                     generation,
                                     image: image.clone(),
                                 })
@@ -304,27 +421,55 @@ impl FocalEditorApp {
             if result.generation != self.latest_generation {
                 continue;
             }
-            self.cie_scope_texture = Some(context.load_texture(
-                format!("focal-editor-cie-scope-{}", result.generation),
-                render_trace(&result.cie1931, 1.0, 0.55, DensityScale::Linear, false),
-                egui::TextureOptions::LINEAR,
-            ));
-            self.ryb_scope_texture = Some(context.load_texture(
-                format!("focal-editor-ryb-scope-{}", result.generation),
-                render_trace(&result.ryb, 1.0, 0.55, DensityScale::Logarithmic, false),
-                egui::TextureOptions::LINEAR,
-            ));
+            self.install_scope_textures(context, &result);
+            self.latest_scope_result = Some(result);
             self.scoping = false;
+        }
+
+        while let Ok(result) = self.export_receiver.try_recv() {
+            self.exporting = false;
+            match result.result {
+                Ok(()) => {
+                    self.last_export_directory =
+                        result.path.parent().map(std::path::Path::to_path_buf);
+                    self.status = format!("Exported {}", result.path.display());
+                }
+                Err(error) => {
+                    self.status = format!("Could not export {}: {error}", result.path.display());
+                }
+            }
         }
 
         if background_work_needs_repaint(
             self.loading,
             self.rendering,
             self.scoping,
+            self.exporting,
             self.pending_thumbnails,
         ) {
             context.request_repaint_after(std::time::Duration::from_millis(30));
         }
+    }
+
+    fn install_scope_textures(&mut self, context: &egui::Context, result: &ScopeResult) {
+        let cie1931 = plot_analysis(&result.cie1931);
+        let ryb = plot_analysis(&result.ryb);
+        self.cie_scope_texture = Some(
+            context.load_texture(
+                format!("focal-editor-cie-scope-{}", result.generation),
+                render_trace(&cie1931, 1.0, 0.55, DensityScale::Linear, false)
+                    .expect("editor-owned CIE scope analysis is structurally valid"),
+                egui::TextureOptions::LINEAR,
+            ),
+        );
+        self.ryb_scope_texture = Some(
+            context.load_texture(
+                format!("focal-editor-ryb-scope-{}", result.generation),
+                render_trace(&ryb, 1.0, 0.55, self.scope_density_scale, false)
+                    .expect("editor-owned RYB scope analysis is structurally valid"),
+                egui::TextureOptions::LINEAR,
+            ),
+        );
     }
 
     fn load_result_is_current(&self, generation: u64) -> bool {
@@ -335,25 +480,35 @@ impl FocalEditorApp {
         let display_path = path.display().to_string();
         self.source_path = Some(path);
         self.sidecar_path = None;
-        self.source_histogram = Some(Histogram::from_pixels(&image.pixels));
-        self.source_texture = Some(context.load_texture(
-            format!("focal-editor-before-{}", self.latest_generation),
-            egui::ColorImage::from_rgba_unmultiplied(
-                [image.width as usize, image.height as usize],
-                &image.rgba,
-            ),
-            egui::TextureOptions::LINEAR,
-        ));
-        // Keep the After pane useful while the first background render is in
-        // flight. The completed render replaces this texture with the actual
-        // FocalCore result.
-        self.output_texture = self.source_texture.clone();
+        self.source_histogram = None;
+        self.output_histogram = None;
+        self.latest_scope_result = None;
+        self.cie_scope_texture = None;
+        self.ryb_scope_texture = None;
+        self.scoping = false;
+        self.source_texture = None;
+        self.output_texture = None;
         self.source_core = image.to_core_image().ok().map(Arc::new);
+        let [preview_width, preview_height] =
+            bounded_preview_dimensions(image.width, image.height, PREVIEW_MAX_PIXELS);
+        self.preview_sampling = PreviewSampling::full(preview_width, preview_height);
+        self.texture_sampling = self.preview_sampling;
         self.source = Some(image);
         self.output = None;
         self.output_generation = None;
         self.exposure_stops = 0.0;
         self.contrast = 0.0;
+        self.warmth = 0.0;
+        self.tint = 0.0;
+        self.local_contrast_amount = 0.0;
+        self.local_contrast_radius = 80.0;
+        self.saturation = 0.0;
+        self.noise_luminance = 0.0;
+        self.noise_colour = 0.0;
+        self.crop = None;
+        self.crop_mode = CropMode::Inactive;
+        self.crop_aspect_lock = AspectLock::Free;
+        self.preview_view = PreviewView::default();
         self.status = format!("Loaded {display_path}");
         self.request_preview(context);
     }
@@ -387,7 +542,19 @@ impl FocalEditorApp {
             let pending = self.pending_transparency.take();
             if accept {
                 if let Some((path, image)) = pending {
-                    self.install_image(path, image.flatten_onto_black(), context);
+                    self.loading = true;
+                    self.status = "Flattening transparency onto black…".to_owned();
+                    if self
+                        .load_sender
+                        .send(LoadRequest {
+                            generation: self.latest_load_generation,
+                            operation: LoadOperation::FlattenOntoBlack { path, image },
+                        })
+                        .is_err()
+                    {
+                        self.loading = false;
+                        self.status = "The image loader is unavailable".to_owned();
+                    }
                 }
             } else {
                 self.status = "Open cancelled; the source was not modified".to_owned();
@@ -396,9 +563,10 @@ impl FocalEditorApp {
     }
 
     fn request_preview(&mut self, context: &egui::Context) {
-        let Some(source) = self.source_core.as_ref() else {
+        let Some(source) = self.preview_render_source() else {
             return;
         };
+        let source = Arc::clone(source);
         self.next_generation = self.next_generation.saturating_add(1);
         self.latest_generation = self.next_generation;
         self.rendering = true;
@@ -408,14 +576,53 @@ impl FocalEditorApp {
         self.status = "Rendering preview…".to_owned();
         let request = PreviewRequest {
             generation: self.latest_generation,
-            source: Arc::clone(source),
-            snapshot: preview::snapshot_with_adjustments(self.exposure_stops, self.contrast),
+            source,
+            sampling: self.preview_sampling,
+            snapshot: preview::snapshot_with_adjustments(self.adjustments()),
         };
         if self.preview_worker.submit(request).is_err() {
             self.rendering = false;
             self.status = "The preview worker is unavailable".to_owned();
         }
         context.request_repaint();
+    }
+
+    fn reset_preview_sampling_to_full(&mut self) {
+        if let Some(source) = self.source.as_ref() {
+            let dimensions = preview_content_dimensions(
+                [source.width, source.height],
+                self.crop_mode,
+                self.crop,
+            );
+            let [width, height] =
+                bounded_preview_dimensions(dimensions[0], dimensions[1], PREVIEW_MAX_PIXELS);
+            self.preview_sampling = PreviewSampling::full(width, height);
+        }
+    }
+
+    fn preview_render_source(&self) -> Option<&Arc<Image>> {
+        self.source_core.as_ref()
+    }
+
+    fn full_resolution_export_source(&self) -> Option<&Arc<Image>> {
+        self.source_core.as_ref()
+    }
+
+    fn adjustments(&self) -> Adjustments {
+        Adjustments {
+            warmth: self.warmth,
+            tint: self.tint,
+            exposure_stops: self.exposure_stops,
+            contrast: self.contrast,
+            local_contrast_amount: self.local_contrast_amount,
+            local_contrast_radius: self.local_contrast_radius,
+            saturation: self.saturation,
+            noise_luminance: self.noise_luminance,
+            noise_colour: self.noise_colour,
+            crop: (self.crop_mode != CropMode::Editing)
+                .then_some(self.crop)
+                .flatten(),
+        }
     }
 
     fn save_sidecar(&mut self) {
@@ -446,6 +653,14 @@ impl FocalEditorApp {
             source_path: source_path.display().to_string(),
             exposure_stops: self.exposure_stops,
             contrast: self.contrast,
+            warmth: self.warmth,
+            tint: self.tint,
+            local_contrast_amount: self.local_contrast_amount,
+            local_contrast_radius: self.local_contrast_radius,
+            saturation: self.saturation,
+            noise_luminance: self.noise_luminance,
+            noise_colour: self.noise_colour,
+            crop: self.crop,
         };
         match serde_json::to_string_pretty(&state)
             .map_err(|error| error.to_string())
@@ -465,8 +680,7 @@ impl FocalEditorApp {
             self.status = "Wait for the current render before exporting".to_owned();
             return;
         }
-        let (Some(source_path), Some(output)) = (self.source_path.as_ref(), self.output.as_ref())
-        else {
+        let (Some(source_path), Some(_)) = (self.source_path.as_ref(), self.output.as_ref()) else {
             self.status = "Render a preview before exporting".to_owned();
             return;
         };
@@ -484,22 +698,49 @@ impl FocalEditorApp {
         else {
             return;
         };
-        let pixels = rgba_bytes(output.pixels());
-        let result = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-            output.width(),
-            output.height(),
-            pixels,
-        )
-        .ok_or_else(|| "the rendered buffer dimensions are invalid".to_owned())
-        .and_then(|image| image.save(&path).map_err(|error| error.to_string()));
-        match result {
-            Ok(()) => self.status = format!("Exported {}", path.display()),
-            Err(error) => self.status = format!("Could not export {}: {error}", path.display()),
+        self.export_to_path(&path);
+    }
+
+    fn export_beside_last(&mut self) {
+        let Some(directory) = self.last_export_directory.as_ref() else {
+            return;
+        };
+        let Some(source_path) = self.source_path.as_ref() else {
+            return;
+        };
+        self.export_to_path(&default_export_path(directory, source_path));
+    }
+
+    fn export_to_path(&mut self, path: &std::path::Path) {
+        if !self.can_export() {
+            self.status = "Wait for the current render before exporting".to_owned();
+            return;
+        }
+        let Some(source) = self.full_resolution_export_source() else {
+            self.status = "Open an image before exporting".to_owned();
+            return;
+        };
+        let source = (**source).clone();
+        self.status = "Rendering full-resolution export…".to_owned();
+        self.exporting = true;
+        if self
+            .export_sender
+            .send(ExportRequest {
+                path: path.to_path_buf(),
+                source,
+                snapshot: preview::snapshot_with_adjustments(self.adjustments()),
+            })
+            .is_err()
+        {
+            self.exporting = false;
+            self.status = "The export worker is unavailable".to_owned();
         }
     }
 
     fn can_export(&self) -> bool {
-        !self.rendering
+        !self.loading
+            && !self.rendering
+            && !self.exporting
             && self.output.is_some()
             && self.output_generation == Some(self.latest_generation)
     }
@@ -510,12 +751,23 @@ impl eframe::App for FocalEditorApp {
         let context = ui.ctx().clone();
         self.poll_background_work(&context);
         self.confirm_transparency(&context);
+        if self.crop_mode == CropMode::Editing
+            && context.input(|input| input.key_pressed(egui::Key::Enter))
+        {
+            self.crop_mode = CropMode::Applied;
+            self.reset_preview_sampling_to_full();
+            self.request_preview(&context);
+        }
 
-        ui.allocate_ui_with_layout(
+        let (toolbar_rect, _) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), TOOLBAR_HEIGHT),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| self.show_toolbar(ui),
+            Sense::hover(),
         );
+        ui.painter()
+            .rect_filled(toolbar_rect, CornerRadius::ZERO, PANEL_BACKGROUND);
+        let mut toolbar_ui = ui.new_child(egui::UiBuilder::new().max_rect(toolbar_rect));
+        toolbar_ui.set_clip_rect(toolbar_rect);
+        self.show_toolbar(&mut toolbar_ui, toolbar_rect);
         let filmstrip_height = self
             .filmstrip_height
             .clamp(90.0, (ui.available_height() - 160.0).max(90.0));
@@ -546,7 +798,7 @@ impl eframe::App for FocalEditorApp {
                 ui.allocate_ui_with_layout(
                     Vec2::new(centre_width, ui.available_height()),
                     egui::Layout::top_down(egui::Align::Min),
-                    |ui| self.show_main_panel(ui),
+                    |ui| self.show_main_panel(ui, &context),
                 );
                 let right_handle = resize_handle(ui, ResizeDirection::Horizontal);
                 if right_handle.dragged() {
@@ -574,47 +826,83 @@ impl eframe::App for FocalEditorApp {
 }
 
 impl FocalEditorApp {
-    fn show_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button("Open image…").clicked() {
-                self.open_dialog();
-            }
-            let has_image = self.source.is_some();
-            if ui
-                .add_enabled(has_image, egui::Button::new("Save"))
-                .on_hover_text("Save editable parameters as a JSON sidecar")
-                .clicked()
-            {
-                self.save_sidecar();
-            }
-            if ui
-                .add_enabled(self.can_export(), egui::Button::new("Export"))
-                .on_hover_text("Render the current preview to an 8-bit sRGB PNG")
-                .clicked()
-            {
-                self.export_png();
-            }
-            ui.add_space(12.0);
-            let (progress, label) = if self.loading {
-                (0.25, "Loading…")
-            } else if self.rendering {
-                (self.render_progress, "Rendering…")
-            } else {
-                (1.0, "Ready")
-            };
-            ui.add(
-                egui::ProgressBar::new(progress)
-                    .desired_width(132.0)
-                    .text(label)
-                    .animate(progress < 1.0),
-            );
-            ui.add_space(8.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new("FOCALPLANE").strong());
-                ui.add_space(12.0);
-                ui.label(egui::RichText::new(&self.status).small().weak());
-            });
-        });
+    fn show_toolbar(&mut self, ui: &mut egui::Ui, bounds: Rect) {
+        let [left_rect, tab_rect, right_rect] = toolbar_regions(bounds);
+
+        let mut left = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(left_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        left.set_clip_rect(left_rect);
+        if left.button("Open image…").clicked() {
+            self.open_dialog();
+        }
+        let has_image = self.source.is_some();
+        if left
+            .add_enabled(has_image, egui::Button::new("Save"))
+            .on_hover_text("Save editable parameters as a JSON sidecar")
+            .clicked()
+        {
+            self.save_sidecar();
+        }
+        if left
+            .add_enabled(self.can_export(), egui::Button::new("Export"))
+            .on_hover_text("Render the current preview to an 8-bit sRGB PNG")
+            .clicked()
+        {
+            self.export_png();
+        }
+        if left
+            .add_enabled(
+                self.can_export() && self.last_export_directory.is_some(),
+                egui::Button::new("Export again"),
+            )
+            .on_hover_text("Export to the folder used by the previous export this session")
+            .clicked()
+        {
+            self.export_beside_last();
+        }
+        left.add_space(12.0);
+        let (progress, label) = if self.loading {
+            (0.25, "Loading…")
+        } else if self.rendering {
+            (self.render_progress, "Rendering…")
+        } else {
+            (1.0, "Ready")
+        };
+        left.add(
+            egui::ProgressBar::new(progress)
+                .desired_width(132.0)
+                .text(label)
+                .animate(progress < 1.0),
+        );
+
+        ui.painter().rect_filled(
+            tab_rect.shrink2(Vec2::new(2.0, 4.0)),
+            CornerRadius::same(4),
+            PANEL_BACKGROUND,
+        );
+        let mut tabs = ui.new_child(egui::UiBuilder::new().max_rect(tab_rect).layout(
+            egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center),
+        ));
+        tabs.set_clip_rect(tab_rect);
+        tabs.selectable_value(&mut self.editor_tab, EditorTab::MainPhoto, "Main");
+        tabs.selectable_value(
+            &mut self.editor_tab,
+            EditorTab::BeforeAfter,
+            "Before and After",
+        );
+
+        let mut right = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(right_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        right.set_clip_rect(right_rect);
+        right.label(egui::RichText::new("FOCALPLANE").strong());
+        right.add_space(12.0);
+        right.label(egui::RichText::new(&self.status).small().weak());
     }
 
     fn show_left_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
@@ -670,6 +958,13 @@ impl FocalEditorApp {
         if ui.selectable_label(true, "Digital Neutral").clicked() {
             self.exposure_stops = 0.0;
             self.contrast = 0.0;
+            self.warmth = 0.0;
+            self.tint = 0.0;
+            self.local_contrast_amount = 0.0;
+            self.local_contrast_radius = 80.0;
+            self.saturation = 0.0;
+            self.noise_luminance = 0.0;
+            self.noise_colour = 0.0;
             self.request_preview(context);
         }
         ui.label(egui::RichText::new("No saved presets yet").small().weak());
@@ -685,12 +980,42 @@ impl FocalEditorApp {
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Histogram, "Histograms");
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Cie1931, "CIE 1931");
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Ryb, "RYB");
+            if self.scope_tab == ScopeTab::Histogram {
+                ui.selectable_value(
+                    &mut self.histogram_density_scale,
+                    DensityScale::Linear,
+                    "Linear",
+                );
+                ui.selectable_value(
+                    &mut self.histogram_density_scale,
+                    DensityScale::Logarithmic,
+                    "Log",
+                );
+            }
+            if self.scope_tab == ScopeTab::Ryb {
+                let previous = self.scope_density_scale;
+                ui.selectable_value(
+                    &mut self.scope_density_scale,
+                    DensityScale::Linear,
+                    "Linear",
+                );
+                ui.selectable_value(
+                    &mut self.scope_density_scale,
+                    DensityScale::Logarithmic,
+                    "Log",
+                );
+                if previous != self.scope_density_scale
+                    && let Some(result) = self.latest_scope_result.clone()
+                {
+                    self.install_scope_textures(context, &result);
+                }
+            }
         });
         ui.label(
             egui::RichText::new(match self.scope_tab {
                 ScopeTab::Histogram => "Display-encoded RGB",
                 ScopeTab::Cie1931 | ScopeTab::Ryb => {
-                    "Decoded sRGB assumption · FocalPlot / darktable-inspired"
+                    "Display-encoded sRGB · FocalCore analysis / FocalPlot presentation"
                 }
             })
             .small()
@@ -711,16 +1036,13 @@ impl FocalEditorApp {
             egui::UiBuilder::new().max_rect(histogram_rect),
             |ui| match self.scope_tab {
                 ScopeTab::Histogram => {
-                    let count = usize::from(self.source_histogram.is_some())
-                        + usize::from(self.output_histogram.is_some());
-                    let chart_height =
-                        ((histogram_height - count as f32 * 18.0) / count.max(1) as f32).max(16.0);
-                    if let Some(histogram) = &self.source_histogram {
-                        draw_histogram(ui, histogram, "Input", chart_height);
-                    }
-                    if let Some(histogram) = &self.output_histogram {
-                        draw_histogram(ui, histogram, "Output", chart_height);
-                    }
+                    draw_histogram_pair(
+                        ui,
+                        self.source_histogram.as_ref(),
+                        self.output_histogram.as_ref(),
+                        histogram_height,
+                        self.histogram_density_scale,
+                    );
                 }
                 ScopeTab::Cie1931 => {
                     draw_scope(ui, self.cie_scope_texture.as_ref(), ScopeSpace::Cie1931);
@@ -744,15 +1066,168 @@ impl FocalEditorApp {
         });
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn show_crop_controls(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        ui.label(egui::RichText::new("Crop and straighten").strong());
+        ui.horizontal(|ui| {
+            let label = match self.crop_mode {
+                CropMode::Inactive => "Crop",
+                CropMode::Editing => "Apply crop",
+                CropMode::Applied => "Edit crop",
+            };
+            if ui.button(label).clicked() {
+                match self.crop_mode {
+                    CropMode::Inactive => {
+                        self.crop = Some(CropSettings::full_image());
+                        self.crop_mode = CropMode::Editing;
+                        self.editor_tab = EditorTab::MainPhoto;
+                    }
+                    CropMode::Editing => {
+                        self.crop_mode = CropMode::Applied;
+                        self.reset_preview_sampling_to_full();
+                        self.request_preview(context);
+                    }
+                    CropMode::Applied => {
+                        self.crop_mode = CropMode::Editing;
+                        self.request_preview(context);
+                    }
+                }
+            }
+            if ui
+                .add_enabled(self.crop.is_some(), egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.crop = None;
+                self.crop_mode = CropMode::Inactive;
+                self.request_preview(context);
+            }
+        });
+        if self.crop_mode == CropMode::Editing {
+            if self.crop_aspect_lock == AspectLock::Free
+                && let (Some(crop), Some(source)) = (self.crop, self.source.as_ref())
+            {
+                self.crop_aspect_x = (crop.right - crop.left) * source.width as f32
+                    / ((crop.bottom - crop.top) * source.height.max(1) as f32);
+                self.crop_aspect_y = 1.0;
+            }
+            let mut rotation = self.crop.map_or(0.0, |crop| crop.rotation_degrees);
+            if ui
+                .add(egui::Slider::new(&mut rotation, -45.0..=45.0).text("Straighten °"))
+                .changed()
+            {
+                let aspect = self
+                    .source
+                    .as_ref()
+                    .map_or(1.0, |image| image.width as f32 / image.height.max(1) as f32);
+                if let Some(crop) = self.crop.as_mut() {
+                    crop.rotation_degrees = rotation;
+                    *crop = crop.shrink_to_safe(aspect);
+                }
+            }
+            ui.label(
+                egui::RichText::new(
+                    "The crop is automatically kept inside the original image while straightening.",
+                )
+                .small()
+                .weak(),
+            );
+            let mut ratio_changed = false;
+            let original_ratio = self.source.as_ref().map_or([3.0, 2.0], |source| {
+                [source.width as f32, source.height as f32]
+            });
+            egui::ComboBox::from_label("Aspect ratio")
+                .selected_text(if self.crop_aspect_lock == AspectLock::Locked {
+                    format!("{} : {}", self.crop_aspect_x, self.crop_aspect_y)
+                } else {
+                    "Free".to_owned()
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(self.crop_aspect_lock == AspectLock::Free, "Free")
+                        .clicked()
+                    {
+                        self.crop_aspect_lock = AspectLock::Free;
+                    }
+                    for (label, x, y) in [
+                        ("Original", original_ratio[0], original_ratio[1]),
+                        ("1 : 1", 1.0, 1.0),
+                        ("3 : 2", 3.0, 2.0),
+                        ("4 : 3", 4.0, 3.0),
+                        ("16 : 9", 16.0, 9.0),
+                    ] {
+                        if ui.selectable_label(false, label).clicked() {
+                            self.crop_aspect_x = x;
+                            self.crop_aspect_y = y;
+                            self.crop_aspect_lock = AspectLock::Locked;
+                            ratio_changed = true;
+                        }
+                    }
+                });
+            ui.horizontal(|ui| {
+                ratio_changed |= ui
+                    .add(egui::DragValue::new(&mut self.crop_aspect_x).range(0.1..=100.0))
+                    .changed();
+                if ui
+                    .selectable_label(self.crop_aspect_lock == AspectLock::Locked, "🔗")
+                    .on_hover_text("Lock or unlock the crop aspect ratio")
+                    .clicked()
+                {
+                    self.crop_aspect_lock = match self.crop_aspect_lock {
+                        AspectLock::Free => AspectLock::Locked,
+                        AspectLock::Locked => AspectLock::Free,
+                    };
+                    ratio_changed = true;
+                }
+                ratio_changed |= ui
+                    .add(egui::DragValue::new(&mut self.crop_aspect_y).range(0.1..=100.0))
+                    .changed();
+            });
+            if ratio_changed
+                && self.crop_aspect_lock == AspectLock::Locked
+                && let (Some(crop), Some(source)) = (self.crop.as_mut(), self.source.as_ref())
+            {
+                constrain_crop_aspect(
+                    crop,
+                    source.width as f32 / source.height.max(1) as f32,
+                    self.crop_aspect_x / self.crop_aspect_y,
+                );
+            }
+        }
+    }
+
     fn show_controls(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
         ui.heading("Controls");
         ui.label(egui::RichText::new("Global controls").weak());
-        ui.label(
-            egui::RichText::new("Current prototype input: decoded sRGB")
-                .small()
-                .weak(),
+        let input_label = self.source.as_ref().map_or("No image", |source| {
+            if source.input_contract == focal_core::ImageContract::ADOBE_RGB_CURVE {
+                "ICC-managed input → Adobe RGB working input"
+            } else {
+                "Unprofiled input interpreted as sRGB"
+            }
+        });
+        ui.label(egui::RichText::new(input_label).small().weak());
+        ui.add_space(8.0);
+        self.show_crop_controls(ui, context);
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("White balance").strong());
+        let warmth_changed = parameter_row(
+            ui,
+            "Warmth",
+            &mut self.warmth,
+            -100.0..=100.0,
+            0.1,
+            "Decoded-image blue-to-amber balance; not a Kelvin temperature",
+        );
+        let tint_changed = parameter_row(
+            ui,
+            "Tint",
+            &mut self.tint,
+            -100.0..=100.0,
+            0.1,
+            "Decoded-image green-to-magenta balance",
         );
         ui.add_space(8.0);
+        ui.label(egui::RichText::new("Tone").strong());
         let exposure_changed = parameter_row(
             ui,
             "Exposure",
@@ -769,7 +1244,58 @@ impl FocalEditorApp {
             0.1,
             "Temporary FocalCore contrast control",
         );
-        if exposure_changed || contrast_changed {
+        let local_contrast_changed = parameter_row(
+            ui,
+            "Local contrast",
+            &mut self.local_contrast_amount,
+            -100.0..=100.0,
+            0.1,
+            "Strength of lightness detail around the selected radius",
+        );
+        let local_radius_changed = parameter_row(
+            ui,
+            "Local radius",
+            &mut self.local_contrast_radius,
+            1.0..=256.0,
+            1.0,
+            "Lightness-detail radius in preview pixels",
+        );
+        let saturation_changed = parameter_row(
+            ui,
+            "Saturation",
+            &mut self.saturation,
+            -100.0..=100.0,
+            0.1,
+            "HSV saturation with highlight and highly saturated colour protection",
+        );
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Noise reduction").strong());
+        let noise_luminance_changed = parameter_row(
+            ui,
+            "Luminance",
+            &mut self.noise_luminance,
+            0.0..=100.0,
+            0.1,
+            "Edge-aware smoothing of decoded-image brightness noise",
+        );
+        let noise_colour_changed = parameter_row(
+            ui,
+            "Colour",
+            &mut self.noise_colour,
+            0.0..=100.0,
+            0.1,
+            "Edge-aware smoothing of decoded-image colour noise",
+        );
+        if warmth_changed
+            || tint_changed
+            || exposure_changed
+            || contrast_changed
+            || local_contrast_changed
+            || local_radius_changed
+            || saturation_changed
+            || noise_luminance_changed
+            || noise_colour_changed
+        {
             self.request_preview(context);
         }
     }
@@ -818,11 +1344,13 @@ impl FocalEditorApp {
                 .thumbnail_sender
                 .send(ThumbnailRequest {
                     generation: self.thumbnail_generation,
-                    path,
+                    path: path.clone(),
                 })
                 .is_ok()
             {
                 self.pending_thumbnails = self.pending_thumbnails.saturating_add(1);
+            } else if let Some(item) = self.film_strip.iter_mut().find(|item| item.path == path) {
+                item.thumbnail_requested = false;
             }
         }
         if let Some(path) = selected
@@ -832,12 +1360,80 @@ impl FocalEditorApp {
         }
     }
 
-    fn show_main_panel(&self, ui: &mut egui::Ui) {
+    fn show_main_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
         // The two previews intentionally consume the entire centre pane. Any
         // letterboxing is caused only by preserving the source aspect ratio;
         // there is no additional card padding, label row, or decorative
         // border to steal pixels from the image.
         let available = ui.available_size();
+        let sampling_size = if self.editor_tab == EditorTab::BeforeAfter {
+            Vec2::new((available.x * 0.5).floor(), available.y)
+        } else {
+            available
+        };
+        if let Some(source) = self.source.as_ref() {
+            let dimensions = preview_content_dimensions(
+                [source.width, source.height],
+                self.crop_mode,
+                self.crop,
+            );
+            let desired = preview_sampling_for_view(
+                Rect::from_min_size(Pos2::ZERO, sampling_size),
+                dimensions,
+                self.preview_view,
+                context.pixels_per_point(),
+                PREVIEW_MAX_PIXELS,
+            );
+            if desired != self.preview_sampling {
+                self.preview_sampling = desired;
+                self.request_preview(context);
+            }
+        }
+        if self.editor_tab == EditorTab::MainPhoto {
+            let preview_aspect = self.source.as_ref().map(|source| {
+                let dimensions = preview_content_dimensions(
+                    [source.width, source.height],
+                    self.crop_mode,
+                    self.crop,
+                );
+                dimensions[0] as f32 / dimensions[1].max(1) as f32
+            });
+            let after_pixels = self
+                .output
+                .as_ref()
+                .map(|image| (image.pixels(), [image.width(), image.height()]))
+                .or_else(|| {
+                    self.source
+                        .as_ref()
+                        .map(|image| (image.pixels.as_slice(), [image.width, image.height]))
+                });
+            let editable_crop = (self.crop_mode == CropMode::Editing)
+                .then_some(self.crop.as_mut())
+                .flatten();
+            let locked_aspect = self.crop_aspect_lock == AspectLock::Locked;
+            let locked_aspect = locked_aspect.then_some(self.crop_aspect_x / self.crop_aspect_y);
+            let main_texture = if self.crop_mode == CropMode::Editing {
+                self.source_texture.as_ref()
+            } else {
+                self.output_texture
+                    .as_ref()
+                    .or(self.source_texture.as_ref())
+            };
+            Self::show_preview(
+                ui,
+                available,
+                main_texture,
+                preview_aspect,
+                self.texture_sampling,
+                after_pixels,
+                "Main",
+                "Open an image to begin",
+                &mut self.preview_view,
+                editable_crop,
+                locked_aspect,
+            );
+            return;
+        }
         let before_size = Vec2::new((available.x * 0.5).floor(), available.y);
         let after_size = Vec2::new(available.x - before_size.x, available.y);
         let before_pixels = self
@@ -862,9 +1458,21 @@ impl FocalEditorApp {
                             ui,
                             before_size,
                             self.source_texture.as_ref(),
+                            self.source.as_ref().map(|source| {
+                                let dimensions = preview_content_dimensions(
+                                    [source.width, source.height],
+                                    self.crop_mode,
+                                    self.crop,
+                                );
+                                dimensions[0] as f32 / dimensions[1].max(1) as f32
+                            }),
+                            self.texture_sampling,
                             before_pixels,
                             "Before",
                             "Open an image to begin",
+                            &mut self.preview_view,
+                            None,
+                            None,
                         );
                     },
                 );
@@ -878,9 +1486,21 @@ impl FocalEditorApp {
                             self.output_texture
                                 .as_ref()
                                 .or(self.source_texture.as_ref()),
+                            self.source.as_ref().map(|source| {
+                                let dimensions = preview_content_dimensions(
+                                    [source.width, source.height],
+                                    self.crop_mode,
+                                    self.crop,
+                                );
+                                dimensions[0] as f32 / dimensions[1].max(1) as f32
+                            }),
+                            self.texture_sampling,
                             after_pixels,
                             "After",
                             "The rendered preview will appear here",
+                            &mut self.preview_view,
+                            None,
+                            None,
                         );
                     },
                 );
@@ -888,30 +1508,134 @@ impl FocalEditorApp {
         );
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn show_preview(
         ui: &mut egui::Ui,
         size: Vec2,
         texture: Option<&TextureHandle>,
+        source_aspect: Option<f32>,
+        texture_sampling: PreviewSampling,
         pixels: Option<(&[[f32; 3]], [u32; 2])>,
         label: &str,
         empty: &str,
+        view: &mut PreviewView,
+        mut editable_crop: Option<&mut CropSettings>,
+        locked_aspect: Option<f32>,
     ) {
-        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, CornerRadius::ZERO, PREVIEW_BACKGROUND);
+        if response.hovered() {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll.abs() > f32::EPSILON {
+                view.zoom = (view.zoom * (scroll * 0.002).exp()).clamp(1.0, 16.0);
+                if (view.zoom - 1.0).abs() < f32::EPSILON {
+                    view.pan = Vec2::ZERO;
+                }
+            }
+        }
+        if response.dragged() && editable_crop.is_none() {
+            view.pan += response.drag_delta();
+        }
+        let display_aspect = texture.map(|texture| {
+            source_aspect
+                .unwrap_or_else(|| texture.size_vec2().x / texture.size_vec2().y.max(0.001))
+        });
+        if let Some(aspect) = display_aspect {
+            constrain_preview_pan(rect, aspect, view);
+        }
         let image_rect = texture.map(|texture| {
-            fit_rect(
+            transformed_image_rect(
                 rect,
-                texture.size_vec2().x / texture.size_vec2().y.max(0.001),
+                display_aspect
+                    .unwrap_or_else(|| texture.size_vec2().x / texture.size_vec2().y.max(0.001)),
+                *view,
             )
         });
         if let (Some(texture), Some(image_rect)) = (texture, image_rect) {
             painter.image(
                 texture.id(),
-                image_rect,
+                sampled_texture_rect(image_rect, texture_sampling),
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
+            if let Some(crop) = editable_crop.as_mut() {
+                let drag_id = response.id.with("crop-drag-session");
+                if response.drag_started()
+                    && let Some(start) = response.interact_pointer_pos()
+                {
+                    let session = CropDragSession {
+                        kind: crop_drag_kind(start, image_rect, crop),
+                        initial: **crop,
+                        start,
+                    };
+                    ui.data_mut(|data| data.insert_temp(drag_id, session));
+                }
+                if response.dragged()
+                    && let (Some(session), Some(current)) = (
+                        ui.data(|data| data.get_temp::<CropDragSession>(drag_id)),
+                        response.interact_pointer_pos(),
+                    )
+                {
+                    let previous_crop = **crop;
+                    **crop = session.initial;
+                    let start = normalised_image_position(session.start, image_rect);
+                    let current = normalised_image_position(current, image_rect);
+                    let local_current = unrotate_crop_position(
+                        current,
+                        &session.initial,
+                        image_rect.aspect_ratio(),
+                    );
+                    match session.kind {
+                        CropDragKind::New => {
+                            **crop = crop_from_drag(
+                                start,
+                                current,
+                                image_rect.aspect_ratio(),
+                                locked_aspect,
+                            );
+                            crop.rotation_degrees = 0.0;
+                        }
+                        CropDragKind::Left => {
+                            crop.left = local_current[0].min(crop.right - 0.001);
+                        }
+                        CropDragKind::Right => {
+                            crop.right = local_current[0].max(crop.left + 0.001);
+                        }
+                        CropDragKind::Top => {
+                            crop.top = local_current[1].min(crop.bottom - 0.001);
+                        }
+                        CropDragKind::Bottom => {
+                            crop.bottom = local_current[1].max(crop.top + 0.001);
+                        }
+                        CropDragKind::Rotate => {
+                            let centre = crop_screen_rect(image_rect, &session.initial).center();
+                            let start_vector = session.start - centre;
+                            let current_vector = current_position(current, image_rect) - centre;
+                            let start_angle = start_vector.y.atan2(start_vector.x);
+                            let current_angle = current_vector.y.atan2(current_vector.x);
+                            crop.rotation_degrees = (session.initial.rotation_degrees
+                                + (current_angle - start_angle).to_degrees())
+                            .clamp(-45.0, 45.0);
+                            **crop = crop.shrink_to_safe(image_rect.aspect_ratio());
+                        }
+                    }
+                    if session.kind != CropDragKind::New
+                        && let Some(target_aspect) = locked_aspect
+                    {
+                        constrain_crop_aspect(crop, image_rect.aspect_ratio(), target_aspect);
+                    }
+                    if !crop.is_safe_for_aspect(image_rect.aspect_ratio()) {
+                        **crop = previous_crop;
+                    }
+                }
+                if response.drag_stopped() {
+                    ui.data_mut(|data| {
+                        data.remove::<CropDragSession>(drag_id);
+                    });
+                }
+                draw_crop_overlay(&painter, image_rect, crop);
+            }
             if response.hovered() {
                 let font = egui::FontId::proportional(14.0);
                 let label_position = rect.left_top() + Vec2::splat(8.0);
@@ -1046,7 +1770,13 @@ impl Histogram {
     }
 }
 
-fn draw_histogram(ui: &mut egui::Ui, histogram: &Histogram, label: &str, height: f32) {
+fn draw_histogram(
+    ui: &mut egui::Ui,
+    histogram: &Histogram,
+    label: &str,
+    height: f32,
+    scale: DensityScale,
+) {
     ui.label(egui::RichText::new(label).small());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     let painter = ui.painter_at(rect);
@@ -1060,8 +1790,9 @@ fn draw_histogram(ui: &mut egui::Ui, histogram: &Histogram, label: &str, height:
         let bin_width = rect.width() / 256.0;
         for bin in 0..256 {
             for (channel, colour) in colours.iter().enumerate() {
-                let height = rect.height() * histogram.channels[channel][bin] as f32
-                    / histogram.maximum as f32;
+                let count = histogram.channels[channel][bin] as f32;
+                let fraction = histogram_height_fraction(count, histogram.maximum as f32, scale);
+                let height = rect.height() * fraction;
                 if height > 0.0 {
                     let x = rect.left() + bin as f32 * bin_width;
                     painter.line_segment(
@@ -1074,6 +1805,30 @@ fn draw_histogram(ui: &mut egui::Ui, histogram: &Histogram, label: &str, height:
                 }
             }
         }
+    }
+}
+
+fn histogram_height_fraction(count: f32, maximum: f32, scale: DensityScale) -> f32 {
+    match scale {
+        DensityScale::Linear => count / maximum,
+        DensityScale::Logarithmic => count.ln_1p() / maximum.ln_1p(),
+    }
+}
+
+fn draw_histogram_pair(
+    ui: &mut egui::Ui,
+    input: Option<&Histogram>,
+    output: Option<&Histogram>,
+    available_height: f32,
+    scale: DensityScale,
+) {
+    let count = usize::from(input.is_some()) + usize::from(output.is_some());
+    let chart_height = ((available_height - count as f32 * 18.0) / count.max(1) as f32).max(16.0);
+    if let Some(histogram) = input {
+        draw_histogram(ui, histogram, "Input", chart_height, scale);
+    }
+    if let Some(histogram) = output {
+        draw_histogram(ui, histogram, "Output", chart_height, scale);
     }
 }
 
@@ -1189,9 +1944,10 @@ const fn background_work_needs_repaint(
     loading: bool,
     rendering: bool,
     scoping: bool,
+    exporting: bool,
     pending_thumbnails: usize,
 ) -> bool {
-    loading || rendering || scoping || pending_thumbnails > 0
+    loading || rendering || scoping || exporting || pending_thumbnails > 0
 }
 
 fn film_strip_item(ui: &mut egui::Ui, item: &FilmStripItem, selected: bool) -> egui::Response {
@@ -1292,6 +2048,12 @@ fn thumbnail_needs_request(item: &FilmStripItem) -> bool {
     item.thumbnail.is_none() && item.dimensions.is_none() && !item.thumbnail_requested
 }
 
+fn mark_thumbnail_failed(items: &mut [FilmStripItem], path: &std::path::Path) {
+    if let Some(item) = items.iter_mut().find(|item| item.path == path) {
+        item.thumbnail_requested = false;
+    }
+}
+
 fn prefetch_range(
     total: usize,
     first_visible: usize,
@@ -1334,6 +2096,19 @@ fn rgba_bytes(pixels: &[[f32; 3]]) -> Vec<u8> {
                 .chain(std::iter::once(u8::MAX))
         })
         .collect()
+}
+
+fn plot_analysis(analysis: &focal_core::scope::VectorscopeAnalysis) -> VectorscopeAnalysis {
+    VectorscopeAnalysis {
+        space: match analysis.space {
+            focal_core::scope::ScopeSpace::Ryb => ScopeSpace::Ryb,
+            focal_core::scope::ScopeSpace::Cie1931 => ScopeSpace::Cie1931,
+        },
+        resolution: analysis.resolution,
+        density: analysis.density.clone(),
+        colours: analysis.colours.clone(),
+        sampled_pixels: analysis.sampled_pixels,
+    }
 }
 
 /// Estimates display luminance only where the panel-anchored label intersects
@@ -1419,6 +2194,378 @@ fn fit_rect(bounds: Rect, aspect: f32) -> Rect {
     Rect::from_center_size(bounds.center(), size)
 }
 
+fn transformed_image_rect(bounds: Rect, aspect: f32, view: PreviewView) -> Rect {
+    let fitted = fit_rect(bounds, aspect);
+    Rect::from_center_size(
+        fitted.center() + view.pan,
+        fitted.size() * view.zoom.clamp(1.0, 16.0),
+    )
+}
+
+fn constrain_preview_pan(bounds: Rect, aspect: f32, view: &mut PreviewView) {
+    let fitted = fit_rect(bounds, aspect);
+    let scaled = fitted.size() * view.zoom.clamp(1.0, 16.0);
+    let maximum = ((scaled - bounds.size()) * 0.5).max(Vec2::ZERO);
+    view.pan.x = view.pan.x.clamp(-maximum.x, maximum.x);
+    view.pan.y = view.pan.y.clamp(-maximum.y, maximum.y);
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn preview_sampling_for_view(
+    bounds: Rect,
+    source_dimensions: [u32; 2],
+    view: PreviewView,
+    pixels_per_point: f32,
+    maximum_pixels: usize,
+) -> PreviewSampling {
+    let aspect = source_dimensions[0] as f32 / source_dimensions[1].max(1) as f32;
+    let image = transformed_image_rect(bounds, aspect, view);
+    let visible = image.intersect(bounds);
+    let left = ((visible.left() - image.left()) / image.width()).clamp(0.0, 1.0);
+    let top = ((visible.top() - image.top()) / image.height()).clamp(0.0, 1.0);
+    let right = ((visible.right() - image.left()) / image.width()).clamp(left, 1.0);
+    let bottom = ((visible.bottom() - image.top()) / image.height()).clamp(top, 1.0);
+    let display_width = (visible.width() * pixels_per_point).round().max(1.0) as u32;
+    let display_height = (visible.height() * pixels_per_point).round().max(1.0) as u32;
+    let native_width = ((right - left) * source_dimensions[0] as f32)
+        .ceil()
+        .max(1.0) as u32;
+    let native_height = ((bottom - top) * source_dimensions[1] as f32)
+        .ceil()
+        .max(1.0) as u32;
+    let mut width = display_width.min(native_width);
+    let mut height = display_height.min(native_height);
+    let pixel_count = width as usize * height as usize;
+    if pixel_count > maximum_pixels {
+        let scale = (maximum_pixels as f64 / pixel_count as f64).sqrt();
+        width = (f64::from(width) * scale).floor().max(1.0) as u32;
+        height = (f64::from(height) * scale).floor().max(1.0) as u32;
+    }
+    PreviewSampling {
+        left,
+        top,
+        right,
+        bottom,
+        width,
+        height,
+    }
+}
+
+fn sampled_texture_rect(image: Rect, sampling: PreviewSampling) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(
+            image.left() + sampling.left * image.width(),
+            image.top() + sampling.top * image.height(),
+        ),
+        Pos2::new(
+            image.left() + sampling.right * image.width(),
+            image.top() + sampling.bottom * image.height(),
+        ),
+    )
+}
+
+fn toolbar_regions(bounds: Rect) -> [Rect; 3] {
+    const TAB_AREA_WIDTH: f32 = 230.0;
+    let tab_rect = Rect::from_center_size(
+        bounds.center(),
+        Vec2::new(TAB_AREA_WIDTH.min(bounds.width()), bounds.height()),
+    );
+    [
+        Rect::from_min_max(bounds.min, Pos2::new(tab_rect.left(), bounds.bottom())),
+        tab_rect,
+        Rect::from_min_max(Pos2::new(tab_rect.right(), bounds.top()), bounds.max),
+    ]
+}
+
+fn normalised_image_position(position: Pos2, image: Rect) -> [f32; 2] {
+    [
+        ((position.x - image.left()) / image.width()).clamp(0.0, 1.0),
+        ((position.y - image.top()) / image.height()).clamp(0.0, 1.0),
+    ]
+}
+
+fn current_position(normalised: [f32; 2], image: Rect) -> Pos2 {
+    Pos2::new(
+        image.left() + normalised[0] * image.width(),
+        image.top() + normalised[1] * image.height(),
+    )
+}
+
+fn unrotate_crop_position(point: [f32; 2], crop: &CropSettings, image_aspect: f32) -> [f32; 2] {
+    let centre = [
+        (crop.left + crop.right) * 0.5,
+        (crop.top + crop.bottom) * 0.5,
+    ];
+    let angle = -crop.rotation_degrees.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let x = (point[0] - centre[0]) * image_aspect;
+    let y = point[1] - centre[1];
+    [
+        (cos * x - sin * y) / image_aspect + centre[0],
+        sin * x + cos * y + centre[1],
+    ]
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CropDragKind {
+    New,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Rotate,
+}
+
+#[derive(Clone, Copy)]
+struct CropDragSession {
+    kind: CropDragKind,
+    initial: CropSettings,
+    start: Pos2,
+}
+
+fn crop_drag_kind(start: Pos2, image: Rect, crop: &CropSettings) -> CropDragKind {
+    const HIT_RADIUS: f32 = 12.0;
+    let geometry = crop_screen_geometry(image, crop);
+    let candidates = [
+        (CropDragKind::Left, geometry.side_handles[3]),
+        (CropDragKind::Right, geometry.side_handles[1]),
+        (CropDragKind::Top, geometry.side_handles[0]),
+        (CropDragKind::Bottom, geometry.side_handles[2]),
+        (CropDragKind::Rotate, geometry.rotation_handle),
+    ];
+    candidates
+        .into_iter()
+        .find_map(|(kind, position)| (position.distance(start) <= HIT_RADIUS).then_some(kind))
+        .unwrap_or(CropDragKind::New)
+}
+
+fn crop_screen_rect(image: Rect, crop: &CropSettings) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(
+            image.left() + crop.left * image.width(),
+            image.top() + crop.top * image.height(),
+        ),
+        Pos2::new(
+            image.left() + crop.right * image.width(),
+            image.top() + crop.bottom * image.height(),
+        ),
+    )
+}
+
+struct CropScreenGeometry {
+    corners: [Pos2; 4],
+    side_handles: [Pos2; 4],
+    rotation_handle: Pos2,
+}
+
+fn crop_screen_geometry(image: Rect, crop: &CropSettings) -> CropScreenGeometry {
+    let rect = crop_screen_rect(image, crop);
+    let centre = rect.center();
+    let angle = crop.rotation_degrees.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let rotate = |point: Pos2| {
+        let delta = point - centre;
+        centre + Vec2::new(cos * delta.x - sin * delta.y, sin * delta.x + cos * delta.y)
+    };
+    let corners = [
+        rotate(rect.left_top()),
+        rotate(rect.right_top()),
+        rotate(rect.right_bottom()),
+        rotate(rect.left_bottom()),
+    ];
+    let midpoint = |a: Pos2, b: Pos2| a + (b - a) * 0.5;
+    let side_handles = [
+        midpoint(corners[0], corners[1]),
+        midpoint(corners[1], corners[2]),
+        midpoint(corners[2], corners[3]),
+        midpoint(corners[3], corners[0]),
+    ];
+    let outward = (side_handles[0] - centre).normalized();
+    let outside_candidate = side_handles[0] + outward * 28.0;
+    let inside_candidate = side_handles[0] - outward * 28.0;
+    let rotation_handle = if image.contains(outside_candidate) {
+        outside_candidate
+    } else {
+        Pos2::new(
+            inside_candidate.x.clamp(image.left(), image.right()),
+            inside_candidate.y.clamp(image.top(), image.bottom()),
+        )
+    };
+    CropScreenGeometry {
+        corners,
+        side_handles,
+        rotation_handle,
+    }
+}
+
+fn draw_crop_overlay(painter: &egui::Painter, image: Rect, crop: &CropSettings) {
+    let geometry = crop_screen_geometry(image, crop);
+    let [top_left, top_right, bottom_right, bottom_left] = geometry.corners;
+    let shade = Color32::from_black_alpha(145);
+    for outside in [
+        vec![image.left_top(), image.right_top(), top_right, top_left],
+        vec![
+            image.right_top(),
+            image.right_bottom(),
+            bottom_right,
+            top_right,
+        ],
+        vec![
+            image.right_bottom(),
+            image.left_bottom(),
+            bottom_left,
+            bottom_right,
+        ],
+        vec![image.left_bottom(), image.left_top(), top_left, bottom_left],
+    ] {
+        painter.add(egui::Shape::convex_polygon(outside, shade, Stroke::NONE));
+    }
+    painter.add(egui::Shape::closed_line(
+        geometry.corners.to_vec(),
+        Stroke::new(1.5, Color32::WHITE),
+    ));
+    for handle in geometry.side_handles {
+        painter.rect_filled(
+            Rect::from_center_size(handle, Vec2::splat(8.0)),
+            CornerRadius::same(1),
+            Color32::WHITE,
+        );
+    }
+    painter.line_segment(
+        [geometry.side_handles[0], geometry.rotation_handle],
+        Stroke::new(1.5, Color32::WHITE),
+    );
+    painter.circle_filled(geometry.rotation_handle, 5.0, Color32::WHITE);
+}
+
+fn constrain_crop_aspect(crop: &mut CropSettings, image_aspect: f32, target_aspect: f32) {
+    if image_aspect <= 0.0 || target_aspect <= 0.0 {
+        return;
+    }
+    let centre_x = (crop.left + crop.right) * 0.5;
+    let centre_y = (crop.top + crop.bottom) * 0.5;
+    let available_width = crop.right - crop.left;
+    let available_height = crop.bottom - crop.top;
+    let normalised_ratio = target_aspect / image_aspect;
+    let (width, height) = if available_width / available_height > normalised_ratio {
+        (available_height * normalised_ratio, available_height)
+    } else {
+        (available_width, available_width / normalised_ratio)
+    };
+    crop.left = (centre_x - width * 0.5).clamp(0.0, 1.0 - width);
+    crop.top = (centre_y - height * 0.5).clamp(0.0, 1.0 - height);
+    crop.right = crop.left + width;
+    crop.bottom = crop.top + height;
+}
+
+fn crop_from_drag(
+    start: [f32; 2],
+    mut end: [f32; 2],
+    image_aspect: f32,
+    target_aspect: Option<f32>,
+) -> CropSettings {
+    if let Some(target) = target_aspect {
+        let ratio = target / image_aspect.max(0.001);
+        let dx = end[0] - start[0];
+        let dy = end[1] - start[1];
+        if dx.abs() / dy.abs().max(0.001) > ratio {
+            let direction = if dy < 0.0 { -1.0 } else { 1.0 };
+            end[1] = start[1] + dx.abs() / ratio * direction;
+        } else {
+            let direction = if dx < 0.0 { -1.0 } else { 1.0 };
+            end[0] = start[0] + dy.abs() * ratio * direction;
+        }
+        if !(0.0..=1.0).contains(&end[0]) || !(0.0..=1.0).contains(&end[1]) {
+            let scale_x = if end[0] < 0.0 {
+                start[0] / (start[0] - end[0])
+            } else if end[0] > 1.0 {
+                (1.0 - start[0]) / (end[0] - start[0])
+            } else {
+                1.0
+            };
+            let scale_y = if end[1] < 0.0 {
+                start[1] / (start[1] - end[1])
+            } else if end[1] > 1.0 {
+                (1.0 - start[1]) / (end[1] - start[1])
+            } else {
+                1.0
+            };
+            let scale = scale_x.min(scale_y).clamp(0.0, 1.0);
+            end = [
+                start[0] + (end[0] - start[0]) * scale,
+                start[1] + (end[1] - start[1]) * scale,
+            ];
+        }
+    }
+    CropSettings {
+        left: start[0].min(end[0]),
+        top: start[1].min(end[1]),
+        right: start[0].max(end[0]).max(start[0].min(end[0]) + 0.001),
+        bottom: start[1].max(end[1]).max(start[1].min(end[1]) + 0.001),
+        rotation_degrees: 0.0,
+    }
+}
+
+fn preview_texture_options(
+    preview: &Image,
+    full_source: Option<&DecodedImage>,
+) -> egui::TextureOptions {
+    if full_source.is_some_and(|source| {
+        source.width as usize * source.height as usize <= PREVIEW_MAX_PIXELS
+            || (source.width == preview.width() && source.height == preview.height())
+    }) {
+        egui::TextureOptions::NEAREST
+    } else {
+        egui::TextureOptions::LINEAR
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn bounded_preview_dimensions(width: u32, height: u32, maximum_pixels: usize) -> [u32; 2] {
+    let source_pixels = width as usize * height as usize;
+    if source_pixels <= maximum_pixels {
+        return [width, height];
+    }
+    let scale = (maximum_pixels as f64 / source_pixels as f64).sqrt();
+    [
+        (f64::from(width) * scale).floor().max(1.0) as u32,
+        (f64::from(height) * scale).floor().max(1.0) as u32,
+    ]
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn preview_content_dimensions(
+    source: [u32; 2],
+    crop_mode: CropMode,
+    crop: Option<CropSettings>,
+) -> [u32; 2] {
+    if crop_mode != CropMode::Applied {
+        return source;
+    }
+    crop.map_or(source, |crop| {
+        [
+            ((crop.right - crop.left) * source[0] as f32)
+                .round()
+                .max(1.0) as u32,
+            ((crop.bottom - crop.top) * source[1] as f32)
+                .round()
+                .max(1.0) as u32,
+        ]
+    })
+}
+
+fn default_export_path(directory: &std::path::Path, source_path: &std::path::Path) -> PathBuf {
+    let stem = source_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("untitled");
+    directory.join(format!("{stem}-edited.png"))
+}
+
 fn configure_visuals(context: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = PANEL_BACKGROUND;
@@ -1484,6 +2631,14 @@ mod tests {
             source_path: "/tmp/photo.png".to_owned(),
             exposure_stops: 1.25,
             contrast: -12.0,
+            warmth: 8.0,
+            tint: -3.0,
+            local_contrast_amount: 20.0,
+            local_contrast_radius: 64.0,
+            saturation: 18.0,
+            noise_luminance: 12.0,
+            noise_colour: 24.0,
+            crop: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert_eq!(serde_json::from_str::<EditSidecar>(&json).unwrap(), state);
@@ -1502,14 +2657,18 @@ mod tests {
 
     #[test]
     fn pending_scope_analysis_keeps_ui_polling_after_render_finishes() {
-        assert!(background_work_needs_repaint(false, false, true, 0));
-        assert!(!background_work_needs_repaint(false, false, false, 0));
+        assert!(background_work_needs_repaint(false, false, true, false, 0));
+        assert!(!background_work_needs_repaint(
+            false, false, false, false, 0
+        ));
     }
 
     #[test]
     fn pending_thumbnails_keep_ui_polling_after_other_work_finishes() {
-        assert!(background_work_needs_repaint(false, false, false, 1));
-        assert!(!background_work_needs_repaint(false, false, false, 0));
+        assert!(background_work_needs_repaint(false, false, false, false, 1));
+        assert!(!background_work_needs_repaint(
+            false, false, false, false, 0
+        ));
     }
 
     #[test]
@@ -1597,6 +2756,270 @@ mod tests {
 
         app.rendering = true;
         assert!(!app.can_export());
+
+        app.rendering = false;
+        app.loading = true;
+        assert!(!app.can_export());
+    }
+
+    #[test]
+    fn opening_another_image_invalidates_in_flight_preview_and_export_state() {
+        let context = egui::Context::default();
+        let mut app = FocalEditorApp::new(&context);
+        app.latest_generation = 7;
+        app.output_generation = Some(7);
+        app.output = Some(
+            Image::new(
+                1,
+                1,
+                vec![[0.5; 3]],
+                focal_core::ImageContract::SRGB_DISPLAY,
+            )
+            .unwrap(),
+        );
+        app.open_path(PathBuf::from("new-selection.jpg"));
+
+        assert_ne!(app.latest_generation, 7);
+        assert!(app.output.is_none());
+        assert!(!app.can_export());
+    }
+
+    #[test]
+    fn failed_thumbnail_decode_becomes_retryable() {
+        let mut items = vec![FilmStripItem {
+            path: PathBuf::from("broken.jpg"),
+            thumbnail: None,
+            dimensions: None,
+            thumbnail_requested: true,
+        }];
+        mark_thumbnail_failed(&mut items, std::path::Path::new("broken.jpg"));
+        assert!(thumbnail_needs_request(&items[0]));
+    }
+
+    #[test]
+    fn main_photo_transform_uses_fit_as_one_x_zoom_and_applies_pan() {
+        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 100.0));
+        let transformed = transformed_image_rect(
+            bounds,
+            1.0,
+            PreviewView {
+                zoom: 2.0,
+                pan: Vec2::new(10.0, -5.0),
+            },
+        );
+
+        assert_eq!(transformed.size(), Vec2::splat(200.0));
+        assert_eq!(
+            transformed.center(),
+            bounds.center() + Vec2::new(10.0, -5.0)
+        );
+    }
+
+    #[test]
+    fn zoom_sampling_uses_the_visible_region_and_never_exceeds_one_megapixel() {
+        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::new(1_200.0, 800.0));
+        let sampling = preview_sampling_for_view(
+            bounds,
+            [8_000, 5_000],
+            PreviewView {
+                zoom: 4.0,
+                pan: Vec2::new(100.0, -50.0),
+            },
+            1.0,
+            PREVIEW_MAX_PIXELS,
+        );
+        assert!(sampling.left > 0.0);
+        assert!(sampling.top > 0.0);
+        assert!(sampling.right < 1.0);
+        assert!(sampling.bottom < 1.0);
+        assert!(sampling.width as usize * sampling.height as usize <= PREVIEW_MAX_PIXELS);
+    }
+
+    #[test]
+    fn toolbar_regions_share_one_reserved_row_without_overlap() {
+        let bounds = Rect::from_min_size(Pos2::new(0.0, 20.0), Vec2::new(1_400.0, 48.0));
+        let [left, tabs, right] = toolbar_regions(bounds);
+        let same = |a: f32, b: f32| (a - b).abs() < f32::EPSILON;
+
+        assert!(same(left.top(), bounds.top()));
+        assert!(same(tabs.top(), bounds.top()));
+        assert!(same(right.top(), bounds.top()));
+        assert!(same(left.bottom(), bounds.bottom()));
+        assert!(same(tabs.bottom(), bounds.bottom()));
+        assert!(same(right.bottom(), bounds.bottom()));
+        assert!(same(left.right(), tabs.left()));
+        assert!(same(tabs.right(), right.left()));
+    }
+
+    #[test]
+    fn crop_aspect_lock_preserves_the_requested_pixel_ratio() {
+        let mut crop = CropSettings {
+            left: 0.1,
+            top: 0.1,
+            right: 0.9,
+            bottom: 0.9,
+            rotation_degrees: 0.0,
+        };
+        constrain_crop_aspect(&mut crop, 3.0 / 2.0, 1.0);
+        let pixel_ratio = (crop.right - crop.left) * 1.5 / (crop.bottom - crop.top);
+        assert!((pixel_ratio - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn crop_hit_testing_distinguishes_side_and_rotation_handles() {
+        let image = Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 200.0));
+        let crop = CropSettings {
+            left: 0.25,
+            top: 0.25,
+            right: 0.75,
+            bottom: 0.75,
+            rotation_degrees: 0.0,
+        };
+        let selected = crop_screen_rect(image, &crop);
+
+        assert_eq!(
+            crop_drag_kind(
+                Pos2::new(selected.left(), selected.center().y),
+                image,
+                &crop
+            ),
+            CropDragKind::Left
+        );
+        assert_eq!(
+            crop_drag_kind(
+                Pos2::new(selected.center().x, selected.top() - 28.0),
+                image,
+                &crop
+            ),
+            CropDragKind::Rotate
+        );
+    }
+
+    #[test]
+    fn rotated_crop_geometry_rotates_overlay_and_handle_positions() {
+        let image = Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 200.0));
+        let crop = CropSettings {
+            left: 0.25,
+            top: 0.25,
+            right: 0.75,
+            bottom: 0.75,
+            rotation_degrees: 20.0,
+        };
+        let geometry = crop_screen_geometry(image, &crop);
+
+        assert!(geometry.corners[0].y < geometry.corners[1].y);
+        assert!((geometry.side_handles[0].x - image.center().x).abs() > f32::EPSILON);
+        assert!(geometry.rotation_handle.distance(geometry.side_handles[0]) > 27.0);
+        let top_handle = normalised_image_position(geometry.side_handles[0], image);
+        let local = unrotate_crop_position(top_handle, &crop, image.aspect_ratio());
+        assert!((local[0] - 0.5).abs() < 1.0e-6);
+        assert!((local[1] - crop.top).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn linked_crop_drag_keeps_the_press_point_as_a_corner() {
+        let start = [0.8, 0.7];
+        let crop = crop_from_drag(start, [0.2, 0.1], 3.0 / 2.0, Some(1.0));
+
+        assert!((crop.right - start[0]).abs() < f32::EPSILON);
+        assert!((crop.bottom - start[1]).abs() < f32::EPSILON);
+        let ratio = (crop.right - crop.left) * 1.5 / (crop.bottom - crop.top);
+        assert!((ratio - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn crop_is_excluded_from_render_snapshot_until_finalised() {
+        let context = egui::Context::default();
+        let mut app = FocalEditorApp::new(&context);
+        app.crop = Some(CropSettings {
+            left: 0.2,
+            top: 0.2,
+            right: 0.8,
+            bottom: 0.8,
+            rotation_degrees: 10.0,
+        });
+        app.crop_mode = CropMode::Editing;
+        assert!(app.adjustments().crop.is_none());
+        app.crop_mode = CropMode::Applied;
+        assert_eq!(app.adjustments().crop, app.crop);
+    }
+
+    #[test]
+    fn logarithmic_histogram_scale_lifts_sparse_bins() {
+        let linear = histogram_height_fraction(1.0, 1_000.0, DensityScale::Linear);
+        let logarithmic = histogram_height_fraction(1.0, 1_000.0, DensityScale::Logarithmic);
+        assert!(logarithmic > linear);
+        assert!(
+            (histogram_height_fraction(1_000.0, 1_000.0, DensityScale::Logarithmic) - 1.0).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn cropping_a_small_image_keeps_nearest_neighbour_presentation() {
+        let source = DecodedImage {
+            width: 2,
+            height: 2,
+            rgba: vec![255; 16],
+            pixels: vec![[1.0; 3]; 4],
+            alpha: vec![1.0; 4],
+            input_contract: focal_core::ImageContract::SRGB_DISPLAY,
+            has_transparency: false,
+        };
+        let cropped = Image::new(
+            1,
+            1,
+            vec![[1.0; 3]],
+            focal_core::ImageContract::SRGB_DISPLAY,
+        )
+        .unwrap();
+        assert_eq!(
+            preview_texture_options(&cropped, Some(&source)),
+            egui::TextureOptions::NEAREST
+        );
+    }
+
+    #[test]
+    fn repeat_export_uses_the_last_directory_and_current_source_name() {
+        assert_eq!(
+            default_export_path(
+                std::path::Path::new("/exports"),
+                std::path::Path::new("/photos/frame.jpg"),
+            ),
+            PathBuf::from("/exports/frame-edited.png")
+        );
+    }
+
+    #[test]
+    fn preview_source_is_bounded_without_upscaling_small_images() {
+        let preview = bounded_preview_dimensions(4, 3, 6);
+        assert!(preview[0] as usize * preview[1] as usize <= 6);
+        assert!(preview[0] < 4 || preview[1] < 3);
+        assert_eq!(bounded_preview_dimensions(2, 1, PREVIEW_MAX_PIXELS), [2, 1]);
+        assert_eq!(PREVIEW_MAX_PIXELS, 1_000_000);
+    }
+
+    #[test]
+    fn interactive_preview_samples_the_full_source_while_export_keeps_it_untouched() {
+        let context = egui::Context::default();
+        let mut app = FocalEditorApp::new(&context);
+        app.source_core = Some(Arc::new(
+            Image::new(
+                4,
+                3,
+                vec![[0.5; 3]; 12],
+                focal_core::ImageContract::SRGB_DISPLAY,
+            )
+            .unwrap(),
+        ));
+        app.preview_sampling = PreviewSampling::full(2, 1);
+        assert_eq!(app.preview_render_source().unwrap().width(), 4);
+        assert_eq!(app.full_resolution_export_source().unwrap().width(), 4);
+        assert!(Arc::ptr_eq(
+            app.preview_render_source().unwrap(),
+            app.full_resolution_export_source().unwrap()
+        ));
+        assert_eq!(app.preview_sampling.width, 2);
     }
 
     #[test]
@@ -1622,6 +3045,8 @@ mod tests {
                 height: 1,
                 rgba: vec![128, 128, 128, 255],
                 pixels: vec![[128.0 / 255.0; 3]],
+                alpha: vec![1.0],
+                input_contract: focal_core::ImageContract::SRGB_DISPLAY,
                 has_transparency: false,
             },
             &context,

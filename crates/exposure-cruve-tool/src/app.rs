@@ -9,13 +9,13 @@ use eframe::egui::{
 
 use crate::{
     curve::{
-        BezierHandleKind, Curve, CurveChannel, CurveInterpolation, CurveMode, CurveSet,
-        DerivativeCurve, LuminanceDefinition,
+        BezierHandleKind, CURVE_DOMAIN_LABEL, Curve, CurveChannel, CurveInterpolation, CurveMode,
+        CurveSet, DerivativeCurve, LuminanceDefinition,
     },
     loader::{ImageEvent, ImageLoader},
     pipeline::{
         Histogram, HistogramCalculation, InputColourSpace, PipelineSnapshot, PreparedImage,
-        RenderedPreview, SourceImage, encode_srgb_png,
+        RenderedPreview, SourceImage, write_srgb_png,
     },
     preview::{PreviewWorker, RenderEvent},
 };
@@ -82,6 +82,7 @@ pub struct CurveApp {
     image_request: u64,
     loading_image: bool,
     image_error: Option<String>,
+    pending_transparency_path: Option<PathBuf>,
     current_path: Option<PathBuf>,
     curves: CurveSet,
     mode: CurveMode,
@@ -115,7 +116,7 @@ impl CurveApp {
         let latest_request = worker.request(PipelineSnapshot {
             mode: CurveMode::LinkedRgb,
             curves: curves.clone(),
-            luminance: LuminanceDefinition::Rec709,
+            luminance: LuminanceDefinition::AdobeRgb,
             interpolation: CurveInterpolation::Smooth,
             histogram_calculation: HistogramCalculation::FullResolution,
         });
@@ -128,11 +129,12 @@ impl CurveApp {
             image_request: 0,
             loading_image: false,
             image_error: None,
+            pending_transparency_path: None,
             current_path: None,
             curves,
             mode: CurveMode::LinkedRgb,
             interpolation: CurveInterpolation::Smooth,
-            luminance_definition: LuminanceDefinition::Rec709,
+            luminance_definition: LuminanceDefinition::AdobeRgb,
             histogram_calculation: HistogramCalculation::FullResolution,
             input_colour_space,
             channel: CurveChannel::Red,
@@ -178,6 +180,7 @@ impl CurveApp {
         // The old worker may still finish while the image loader is reading a
         // replacement. Make every event from that worker stale immediately.
         self.latest_request = self.latest_request.wrapping_add(1);
+        self.worker.cancel_active();
         self.rendering = false;
         self.superseded_render = false;
         self.progress = 0.0;
@@ -227,6 +230,12 @@ impl CurveApp {
                 ImageEvent::Failed { id, message } if id == self.image_request => {
                     self.loading_image = false;
                     self.image_error = Some(message);
+                }
+                ImageEvent::TransparencyConfirmationRequired { id, path }
+                    if id == self.image_request =>
+                {
+                    self.loading_image = false;
+                    self.pending_transparency_path = Some(path);
                 }
                 _ => {}
             }
@@ -312,9 +321,9 @@ impl CurveApp {
             ui.separator();
             ui.label(egui::RichText::new(self.mode.label()).strong());
             ui.label("•");
-            ui.label("sRGB-like curve domain").on_hover_text(
-                "The curve sees display-referred encoded values from 0.0 to 1.0, not linear light or unbounded RAW data.",
-            );
+            ui.label("Adobe RGB curve domain").on_hover_text(format!(
+                "The curve sees {CURVE_DOMAIN_LABEL} values from 0.0 to 1.0, not linear light or unbounded RAW data."
+            ));
             ui.add_space(12.0);
             ui.label("Mode");
             egui::ComboBox::from_id_salt("curve-mode")
@@ -808,13 +817,7 @@ impl CurveApp {
         if !edited.insert_point_on_curve(target[0], self.interpolation) {
             return false;
         }
-        if let Some(point) = edited
-            .points_mut()
-            .iter_mut()
-            .find(|point| (point.x - target[0].clamp(0.0, 1.0)).abs() < 1e-5)
-        {
-            point.y = target[1];
-        }
+        edited.set_point_y_near(target[0].clamp(0.0, 1.0), target[1], 1e-5);
         let tone_with_anchor = {
             let mut tone = current.clone();
             if !tone.insert_point_on_curve(target[0], self.interpolation) {
@@ -983,13 +986,40 @@ impl CurveApp {
         let Some(preview) = &self.rendered else {
             return;
         };
-        let Ok(bytes) = encode_srgb_png(preview) else {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG image", &["png"])
+            .set_file_name("exposure-curve-preview.png")
+            .save_file()
+        else {
             return;
         };
-        let path = PathBuf::from("exposure-curve-preview.png");
-        if std::fs::write(&path, bytes).is_ok() {
-            self.last_export = Some(path);
+        match write_srgb_png(&path, preview) {
+            Ok(()) => self.last_export = Some(path),
+            Err(error) => self.image_error = Some(error.to_string()),
         }
+    }
+
+    fn show_transparency_confirmation(&mut self, context: &egui::Context) {
+        let Some(path) = self.pending_transparency_path.clone() else {
+            return;
+        };
+        egui::Window::new("Flatten transparent image?")
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label("This image contains transparency.");
+                ui.label("Continue by flattening it over white?");
+                ui.horizontal(|ui| {
+                    if ui.button("Flatten and open").clicked() {
+                        self.pending_transparency_path = None;
+                        self.image_request = self.image_loader.open_confirmed_flatten(path.clone());
+                        self.loading_image = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pending_transparency_path = None;
+                    }
+                });
+            });
     }
 }
 
@@ -1022,7 +1052,7 @@ impl eframe::App for CurveApp {
                     );
                     ui.label(
                         egui::RichText::new(
-                            "read metadata → selected input space → sRGB-like curve → 8-bit sRGB PNG",
+                            "read metadata → selected input space → Adobe RGB curve → 8-bit sRGB PNG",
                         )
                         .small()
                         .color(Color32::from_rgb(148, 160, 171)),
@@ -1043,6 +1073,7 @@ impl eframe::App for CurveApp {
                     }
                 });
             });
+        self.show_transparency_confirmation(&context);
     }
 }
 

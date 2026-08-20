@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CancellationToken, Image, ImageContract, WorkingSpace};
+use crate::{
+    CancellationToken, CurveMode, CurveSet, Image, ImageContract, WorkingSpace, processing,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleKind {
@@ -11,6 +13,8 @@ pub enum ModuleKind {
     HighlightsAndShadows,
     Contrast,
     TonalCurve,
+    LocalContrast,
+    Saturation,
     CreativeColour,
     NoiseReduction,
     Sharpening,
@@ -19,17 +23,100 @@ pub enum ModuleKind {
     QuantisationAndDither,
 }
 
+/// A non-destructive, axis-aligned crop in the straightened image canvas.
+/// Coordinates are normalised to the uncropped source dimensions.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CropSettings {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub rotation_degrees: f32,
+}
+
+impl CropSettings {
+    #[must_use]
+    pub const fn full_image() -> Self {
+        Self {
+            left: 0.0,
+            top: 0.0,
+            right: 1.0,
+            bottom: 1.0,
+            rotation_degrees: 0.0,
+        }
+    }
+
+    /// Returns the largest centred crop with the source aspect ratio which
+    /// remains wholly inside the source after straightening.
+    #[must_use]
+    pub fn largest_safe_straightened(aspect: f32, rotation_degrees: f32) -> Self {
+        let angle = rotation_degrees.to_radians().abs();
+        let (sin, cos) = angle.sin_cos();
+        let horizontal_scale = aspect / (cos * aspect + sin);
+        let vertical_scale = 1.0 / (sin * aspect + cos);
+        let scale = horizontal_scale.min(vertical_scale).clamp(0.0, 1.0);
+        Self {
+            left: (1.0 - scale) * 0.5,
+            top: (1.0 - scale) * 0.5,
+            right: (1.0 + scale) * 0.5,
+            bottom: (1.0 + scale) * 0.5,
+            rotation_degrees,
+        }
+    }
+
+    #[must_use]
+    pub fn is_safe_for_aspect(self, aspect: f32) -> bool {
+        validate_crop(self).is_ok()
+            && aspect.is_finite()
+            && aspect > 0.0
+            && crop_fits_rotated_source(self, aspect)
+    }
+
+    /// Uniformly shrinks the crop around its centre until its rotated corners
+    /// fit the source, preserving both its centre and aspect ratio.
+    #[must_use]
+    pub fn shrink_to_safe(self, aspect: f32) -> Self {
+        if self.is_safe_for_aspect(aspect) {
+            return self;
+        }
+        let centre_x = (self.left + self.right) * 0.5;
+        let centre_y = (self.top + self.bottom) * 0.5;
+        let width = self.right - self.left;
+        let height = self.bottom - self.top;
+        let mut low = 0.0;
+        let mut high = 1.0;
+        let scaled = |scale: f32| Self {
+            left: centre_x - width * scale * 0.5,
+            top: centre_y - height * scale * 0.5,
+            right: centre_x + width * scale * 0.5,
+            bottom: centre_y + height * scale * 0.5,
+            rotation_degrees: self.rotation_degrees,
+        };
+        for _ in 0..24 {
+            let middle = (low + high) * 0.5;
+            if scaled(middle).is_safe_for_aspect(aspect) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        scaled(low)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ModuleParameters {
     InputTransform,
-    OrientationAndCrop,
-    WhiteBalance { multipliers: [f32; 3] },
+    OrientationAndCrop { crop: Option<CropSettings> },
+    WhiteBalance { warmth: f32, tint: f32 },
     Exposure { stops: f32 },
     HighlightsAndShadows,
     Contrast { amount: f32 },
-    TonalCurve,
+    TonalCurve { curves: CurveSet, mode: CurveMode },
+    LocalContrast { amount: f32, radius: f32 },
+    Saturation { amount: f32 },
     CreativeColour,
-    NoiseReduction,
+    NoiseReduction { luminance: f32, colour: f32 },
     Sharpening,
     Resize,
     OutputTransform,
@@ -47,14 +134,16 @@ impl Module {
     pub const fn kind(&self) -> ModuleKind {
         match self.parameters {
             ModuleParameters::InputTransform => ModuleKind::InputTransform,
-            ModuleParameters::OrientationAndCrop => ModuleKind::OrientationAndCrop,
+            ModuleParameters::OrientationAndCrop { .. } => ModuleKind::OrientationAndCrop,
             ModuleParameters::WhiteBalance { .. } => ModuleKind::WhiteBalance,
             ModuleParameters::Exposure { .. } => ModuleKind::Exposure,
             ModuleParameters::HighlightsAndShadows => ModuleKind::HighlightsAndShadows,
             ModuleParameters::Contrast { .. } => ModuleKind::Contrast,
-            ModuleParameters::TonalCurve => ModuleKind::TonalCurve,
+            ModuleParameters::TonalCurve { .. } => ModuleKind::TonalCurve,
+            ModuleParameters::LocalContrast { .. } => ModuleKind::LocalContrast,
+            ModuleParameters::Saturation { .. } => ModuleKind::Saturation,
             ModuleParameters::CreativeColour => ModuleKind::CreativeColour,
-            ModuleParameters::NoiseReduction => ModuleKind::NoiseReduction,
+            ModuleParameters::NoiseReduction { .. } => ModuleKind::NoiseReduction,
             ModuleParameters::Sharpening => ModuleKind::Sharpening,
             ModuleParameters::Resize => ModuleKind::Resize,
             ModuleParameters::OutputTransform => ModuleKind::OutputTransform,
@@ -73,25 +162,21 @@ impl Module {
         }
         match self.parameters {
             ModuleParameters::InputTransform => {
+                let source_contract = image.contract();
                 for pixel in image.pixels_mut().iter_mut() {
                     if cancellation.is_cancelled() {
                         return Err(());
                     }
-                    for value in pixel {
-                        *value = srgb_to_linear(*value);
-                    }
+                    *pixel = if source_contract == ImageContract::SRGB_DISPLAY {
+                        linear_srgb_to_adobe_rgb(pixel.map(srgb_to_linear))
+                    } else {
+                        pixel.map(adobe_rgb_to_linear)
+                    };
                 }
                 image.set_contract(working_space.image_contract());
             }
-            ModuleParameters::WhiteBalance { multipliers } => {
-                for pixel in image.pixels_mut().iter_mut() {
-                    if cancellation.is_cancelled() {
-                        return Err(());
-                    }
-                    for (value, multiplier) in pixel.iter_mut().zip(multipliers) {
-                        *value *= multiplier;
-                    }
-                }
+            ModuleParameters::WhiteBalance { warmth, tint } => {
+                processing::white_balance(image, warmth, tint, cancellation)?;
             }
             ModuleParameters::Exposure { stops } => {
                 let gain = stops.exp2();
@@ -105,35 +190,43 @@ impl Module {
                 }
             }
             ModuleParameters::Contrast { amount } => {
-                // Temporary CPU-reference definition: linear contrast around
-                // 18% grey. This is intentionally easy to replace after the
-                // photographic behaviour has been evaluated.
-                let slope = (1.0 + amount.clamp(-100.0, 100.0) / 100.0).max(0.0);
+                processing::contrast(image, amount, cancellation)?;
+            }
+            ModuleParameters::TonalCurve { ref curves, mode } => {
                 for pixel in image.pixels_mut().iter_mut() {
                     if cancellation.is_cancelled() {
                         return Err(());
                     }
-                    for value in pixel {
-                        *value = 0.18 + (*value - 0.18) * slope;
-                    }
+                    let encoded = pixel.map(linear_to_adobe_rgb);
+                    *pixel = curves.apply(mode, encoded).map(adobe_rgb_to_linear);
                 }
+            }
+            ModuleParameters::LocalContrast { amount, radius } => {
+                processing::local_contrast(image, amount, radius, cancellation)?;
+            }
+            ModuleParameters::Saturation { amount } => {
+                processing::saturation(image, amount, cancellation)?;
+            }
+            ModuleParameters::NoiseReduction { luminance, colour } => {
+                processing::noise_reduction(image, luminance, colour, cancellation)?;
             }
             ModuleParameters::OutputTransform => {
                 for pixel in image.pixels_mut().iter_mut() {
                     if cancellation.is_cancelled() {
                         return Err(());
                     }
-                    for value in pixel {
-                        *value = linear_to_srgb(*value);
-                    }
+                    let linear_srgb = linear_adobe_rgb_to_srgb(*pixel);
+                    *pixel = linear_srgb.map(|value| linear_to_srgb(value).clamp(0.0, 1.0));
                 }
                 image.set_contract(ImageContract::SRGB_DISPLAY);
             }
-            ModuleParameters::OrientationAndCrop
-            | ModuleParameters::HighlightsAndShadows
-            | ModuleParameters::TonalCurve
+            ModuleParameters::OrientationAndCrop { crop } => {
+                if let Some(crop) = crop {
+                    apply_crop(image, crop, cancellation)?;
+                }
+            }
+            ModuleParameters::HighlightsAndShadows
             | ModuleParameters::CreativeColour
-            | ModuleParameters::NoiseReduction
             | ModuleParameters::Sharpening
             | ModuleParameters::Resize
             | ModuleParameters::QuantisationAndDither => {}
@@ -145,11 +238,8 @@ impl Module {
     pub(crate) const fn is_placeholder(&self) -> bool {
         matches!(
             self.parameters,
-            ModuleParameters::OrientationAndCrop
-                | ModuleParameters::HighlightsAndShadows
-                | ModuleParameters::TonalCurve
+            ModuleParameters::HighlightsAndShadows
                 | ModuleParameters::CreativeColour
-                | ModuleParameters::NoiseReduction
                 | ModuleParameters::Sharpening
                 | ModuleParameters::Resize
                 | ModuleParameters::QuantisationAndDither
@@ -158,11 +248,10 @@ impl Module {
 
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         match self.parameters {
-            ModuleParameters::WhiteBalance { multipliers } => multipliers
-                .iter()
-                .all(|value| value.is_finite() && *value >= 0.0)
-                .then_some(())
-                .ok_or("white-balance multipliers must be finite and non-negative"),
+            ModuleParameters::WhiteBalance { warmth, tint } => {
+                validate_percentage(warmth, "white-balance warmth must be between -100 and 100")?;
+                validate_percentage(tint, "white-balance tint must be between -100 and 100")
+            }
             ModuleParameters::Exposure { stops } => stops
                 .is_finite()
                 .then_some(())
@@ -176,12 +265,28 @@ impl Module {
                     Ok(())
                 }
             }
+            ModuleParameters::LocalContrast { amount, radius } => {
+                validate_percentage(amount, "local-contrast amount must be between -100 and 100")?;
+                if !radius.is_finite() {
+                    Err("local-contrast radius must be finite")
+                } else if !(1.0..=256.0).contains(&radius) {
+                    Err("local-contrast radius must be between 1 and 256 pixels")
+                } else {
+                    Ok(())
+                }
+            }
+            ModuleParameters::NoiseReduction { luminance, colour } => {
+                validate_strength(luminance, true)?;
+                validate_strength(colour, false)
+            }
+            ModuleParameters::Saturation { amount } => {
+                validate_percentage(amount, "saturation amount must be between -100 and 100")
+            }
+            ModuleParameters::OrientationAndCrop { crop } => crop.map_or(Ok(()), validate_crop),
             ModuleParameters::InputTransform
-            | ModuleParameters::OrientationAndCrop
             | ModuleParameters::HighlightsAndShadows
-            | ModuleParameters::TonalCurve
+            | ModuleParameters::TonalCurve { .. }
             | ModuleParameters::CreativeColour
-            | ModuleParameters::NoiseReduction
             | ModuleParameters::Sharpening
             | ModuleParameters::Resize
             | ModuleParameters::OutputTransform
@@ -195,20 +300,198 @@ impl Module {
         working_space: WorkingSpace,
     ) -> Option<ImageContract> {
         match self.parameters {
-            ModuleParameters::InputTransform => Some(ImageContract::SRGB_DISPLAY),
             ModuleParameters::OutputTransform
             | ModuleParameters::WhiteBalance { .. }
             | ModuleParameters::Exposure { .. }
             | ModuleParameters::HighlightsAndShadows
             | ModuleParameters::Contrast { .. }
-            | ModuleParameters::TonalCurve
+            | ModuleParameters::TonalCurve { .. }
+            | ModuleParameters::LocalContrast { .. }
+            | ModuleParameters::Saturation { .. }
             | ModuleParameters::CreativeColour
-            | ModuleParameters::NoiseReduction
+            | ModuleParameters::NoiseReduction { .. }
             | ModuleParameters::Sharpening => Some(working_space.image_contract()),
-            ModuleParameters::OrientationAndCrop
+            ModuleParameters::InputTransform
+            | ModuleParameters::OrientationAndCrop { .. }
             | ModuleParameters::Resize
             | ModuleParameters::QuantisationAndDither => None,
         }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn validate_for_image(&self, image: &Image) -> Result<(), &'static str> {
+        if matches!(self.parameters, ModuleParameters::InputTransform)
+            && !matches!(
+                image.contract(),
+                ImageContract::SRGB_DISPLAY | ImageContract::ADOBE_RGB_CURVE
+            )
+        {
+            return Err("input transform requires encoded sRGB or encoded Adobe RGB");
+        }
+        let ModuleParameters::OrientationAndCrop { crop: Some(crop) } = self.parameters else {
+            return Ok(());
+        };
+        let aspect = image.width() as f32 / image.height() as f32;
+        if crop_fits_rotated_source(crop, aspect) {
+            Ok(())
+        } else {
+            Err("crop rectangle extends beyond the original image after rotation")
+        }
+    }
+}
+
+fn validate_crop(crop: CropSettings) -> Result<(), &'static str> {
+    let values = [
+        crop.left,
+        crop.top,
+        crop.right,
+        crop.bottom,
+        crop.rotation_degrees,
+    ];
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err("crop values must be finite");
+    }
+    if !(0.0..1.0).contains(&crop.left)
+        || !(0.0..1.0).contains(&crop.top)
+        || !(0.0..=1.0).contains(&crop.right)
+        || !(0.0..=1.0).contains(&crop.bottom)
+        || crop.left >= crop.right
+        || crop.top >= crop.bottom
+    {
+        return Err("crop rectangle must be ordered inside the normalised image bounds");
+    }
+    if !(-45.0..=45.0).contains(&crop.rotation_degrees) {
+        return Err("crop rotation must be between -45 and 45 degrees");
+    }
+    Ok(())
+}
+
+fn inverse_rotate_normalised(
+    point: [f32; 2],
+    centre: [f32; 2],
+    degrees: f32,
+    aspect: f32,
+) -> [f32; 2] {
+    let angle = -degrees.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let x = (point[0] - centre[0]) * aspect;
+    let y = point[1] - centre[1];
+    [
+        (cos * x - sin * y) / aspect + centre[0],
+        sin * x + cos * y + centre[1],
+    ]
+}
+
+fn crop_fits_rotated_source(crop: CropSettings, aspect: f32) -> bool {
+    let centre = [
+        (crop.left + crop.right) * 0.5,
+        (crop.top + crop.bottom) * 0.5,
+    ];
+    [
+        [crop.left, crop.top],
+        [crop.right, crop.top],
+        [crop.right, crop.bottom],
+        [crop.left, crop.bottom],
+    ]
+    .into_iter()
+    .map(|point| inverse_rotate_normalised(point, centre, crop.rotation_degrees, aspect))
+    .all(|point| (0.0..=1.0).contains(&point[0]) && (0.0..=1.0).contains(&point[1]))
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn apply_crop(
+    image: &mut Image,
+    crop: CropSettings,
+    cancellation: &CancellationToken,
+) -> Result<(), ()> {
+    let source_width = image.width();
+    let source_height = image.height();
+    let aspect = source_width as f32 / source_height as f32;
+    let centre = [
+        (crop.left + crop.right) * 0.5,
+        (crop.top + crop.bottom) * 0.5,
+    ];
+    let output_width = ((crop.right - crop.left) * source_width as f32)
+        .round()
+        .max(1.0) as u32;
+    let output_height = ((crop.bottom - crop.top) * source_height as f32)
+        .round()
+        .max(1.0) as u32;
+    let mut pixels = Vec::with_capacity(output_width as usize * output_height as usize);
+    for y in 0..output_height {
+        if cancellation.is_cancelled() {
+            return Err(());
+        }
+        let normalised_y =
+            crop.top + (y as f32 + 0.5) / output_height as f32 * (crop.bottom - crop.top);
+        for x in 0..output_width {
+            let normalised_x =
+                crop.left + (x as f32 + 0.5) / output_width as f32 * (crop.right - crop.left);
+            let source = inverse_rotate_normalised(
+                [normalised_x, normalised_y],
+                centre,
+                crop.rotation_degrees,
+                aspect,
+            );
+            let source_x = source[0] * source_width as f32 - 0.5;
+            let source_y = source[1] * source_height as f32 - 0.5;
+            pixels.push(bilinear_sample(image, source_x, source_y));
+        }
+    }
+    *image = Image::new(output_width, output_height, pixels, image.contract())
+        .expect("validated crop always constructs a finite, non-empty image");
+    Ok(())
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn bilinear_sample(image: &Image, x: f32, y: f32) -> [f32; 3] {
+    let x = x.clamp(0.0, image.width().saturating_sub(1) as f32);
+    let y = y.clamp(0.0, image.height().saturating_sub(1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(image.width() - 1);
+    let y1 = (y0 + 1).min(image.height() - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let pixel = |x: u32, y: u32| image.pixels()[(y * image.width() + x) as usize];
+    let top = mix_pixel(pixel(x0, y0), pixel(x1, y0), tx);
+    let bottom = mix_pixel(pixel(x0, y1), pixel(x1, y1), tx);
+    mix_pixel(top, bottom, ty)
+}
+
+fn mix_pixel(a: [f32; 3], b: [f32; 3], amount: f32) -> [f32; 3] {
+    std::array::from_fn(|channel| a[channel] + (b[channel] - a[channel]) * amount)
+}
+
+fn validate_percentage(value: f32, range_error: &'static str) -> Result<(), &'static str> {
+    if !value.is_finite() {
+        Err("adjustment value must be finite")
+    } else if !(-100.0..=100.0).contains(&value) {
+        Err(range_error)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_strength(value: f32, luminance: bool) -> Result<(), &'static str> {
+    if !value.is_finite() {
+        Err("noise-reduction strength must be finite")
+    } else if !(0.0..=100.0).contains(&value) {
+        if luminance {
+            Err("noise-reduction luminance must be between 0 and 100")
+        } else {
+            Err("noise-reduction colour must be between 0 and 100")
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -226,4 +509,28 @@ fn linear_to_srgb(value: f32) -> f32 {
     } else {
         1.055 * value.powf(1.0 / 2.4) - 0.055
     }
+}
+
+fn linear_to_adobe_rgb(value: f32) -> f32 {
+    value.max(0.0).powf(1.0 / 2.199_218_8)
+}
+
+fn adobe_rgb_to_linear(value: f32) -> f32 {
+    value.clamp(0.0, 1.0).powf(2.199_218_8)
+}
+
+fn linear_srgb_to_adobe_rgb(rgb: [f32; 3]) -> [f32; 3] {
+    [
+        0.715_126 * rgb[0] + 0.284_874 * rgb[1],
+        0.000_000 * rgb[0] + 1.000_000 * rgb[1],
+        0.000_000 * rgb[0] + 0.041_162 * rgb[1] + 0.958_838 * rgb[2],
+    ]
+}
+
+fn linear_adobe_rgb_to_srgb(rgb: [f32; 3]) -> [f32; 3] {
+    [
+        1.398_355 * rgb[0] - 0.398_355 * rgb[1],
+        rgb[1],
+        -0.042_929 * rgb[1] + 1.042_929 * rgb[2],
+    ]
 }

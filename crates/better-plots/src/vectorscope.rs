@@ -10,9 +10,12 @@
 )]
 #![allow(clippy::unreadable_literal)] // Published CIE table values remain recognisable as written.
 
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    fmt,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use eframe::egui::{Color32, ColorImage};
@@ -95,6 +98,22 @@ pub struct VectorscopeAnalysis {
     pub colours: Vec<[f32; 3]>,
     pub sampled_pixels: usize,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TraceRenderError {
+    ResolutionTooSmall { actual: usize },
+    DensityLength { expected: usize, actual: usize },
+    ColourLength { expected: usize, actual: usize },
+    NonFinitePresentationParameter,
+}
+
+impl fmt::Display for TraceRenderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid vectorscope trace input: {self:?}")
+    }
+}
+
+impl std::error::Error for TraceRenderError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScopeSpace {
@@ -300,15 +319,41 @@ fn region_contains(region: Option<AnalysisRegion>, x: f32, y: f32) -> bool {
     }
 }
 
-#[must_use]
+/// Renders a validated vectorscope analysis into a presentation texture.
+///
+/// # Errors
+///
+/// Returns [`TraceRenderError`] when dimensions, backing arrays, intensity,
+/// or sharpness do not form a finite and structurally consistent request.
 pub fn render_trace(
     analysis: &VectorscopeAnalysis,
     intensity: f32,
     sharpness: f32,
     density_scale: DensityScale,
     inverse_highlight: bool,
-) -> ColorImage {
+) -> Result<ColorImage, TraceRenderError> {
     let size = analysis.resolution;
+    if size < 2 {
+        return Err(TraceRenderError::ResolutionTooSmall { actual: size });
+    }
+    let expected = size
+        .checked_mul(size)
+        .ok_or(TraceRenderError::ResolutionTooSmall { actual: size })?;
+    if analysis.density.len() != expected {
+        return Err(TraceRenderError::DensityLength {
+            expected,
+            actual: analysis.density.len(),
+        });
+    }
+    if analysis.colours.len() != expected {
+        return Err(TraceRenderError::ColourLength {
+            expected,
+            actual: analysis.colours.len(),
+        });
+    }
+    if !intensity.is_finite() || !sharpness.is_finite() {
+        return Err(TraceRenderError::NonFinitePresentationParameter);
+    }
     let centre = (size - 1) as f32 * 0.5;
     let radius = centre.max(1.0);
     let mut pixels = Vec::with_capacity(size * size);
@@ -375,7 +420,7 @@ pub fn render_trace(
         }
     }
 
-    ColorImage::new([size, size], pixels)
+    Ok(ColorImage::new([size, size], pixels))
 }
 
 #[must_use]
@@ -523,11 +568,13 @@ pub fn render_reverse_highlight_with_cancellation(
     );
     let radius = radius.max(0.000_1);
     let mut output = vec![0_u8; rgba.len()];
+    let mut processed = 0_usize;
     for y in 0..height {
-        if cancellation.load(Ordering::Relaxed) {
-            return None;
-        }
         for x in 0..width {
+            if processed.is_multiple_of(4_096) && cancellation.load(Ordering::Relaxed) {
+                return None;
+            }
+            processed += 1;
             let index = (y * width + x) * 4;
             let alpha = f32::from(rgba[index + 3]) / 255.0;
             if alpha <= f32::EPSILON {
@@ -1008,6 +1055,81 @@ mod tests {
         assert!(
             (left_slope - right_slope).abs() < 0.05,
             "darktable's vectorscope uses a cubic spline, whose first derivative is continuous at this knot; left={left_slope}, right={right_slope}"
+        );
+    }
+
+    #[test]
+    fn trace_rendering_rejects_invalid_public_analysis_shapes() {
+        let zero = VectorscopeAnalysis {
+            space: ScopeSpace::Ryb,
+            resolution: 0,
+            density: Vec::new(),
+            colours: Vec::new(),
+            sampled_pixels: 0,
+        };
+        assert!(matches!(
+            render_trace(&zero, 1.0, 1.0, DensityScale::Linear, false),
+            Err(TraceRenderError::ResolutionTooSmall { actual: 0 })
+        ));
+
+        let malformed = VectorscopeAnalysis {
+            space: ScopeSpace::Ryb,
+            resolution: 2,
+            density: vec![0.0; 3],
+            colours: vec![[0.0; 3]; 4],
+            sampled_pixels: 0,
+        };
+        assert!(matches!(
+            render_trace(&malformed, 1.0, 1.0, DensityScale::Linear, false),
+            Err(TraceRenderError::DensityLength {
+                expected: 4,
+                actual: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn trace_rendering_rejects_non_finite_presentation_parameters() {
+        let analysis = VectorscopeAnalysis {
+            space: ScopeSpace::Ryb,
+            resolution: 2,
+            density: vec![0.0; 4],
+            colours: vec![[0.0; 3]; 4],
+            sampled_pixels: 0,
+        };
+        assert_eq!(
+            render_trace(&analysis, f32::NAN, 1.0, DensityScale::Linear, false),
+            Err(TraceRenderError::NonFinitePresentationParameter)
+        );
+        assert_eq!(
+            render_trace(&analysis, 1.0, f32::INFINITY, DensityScale::Linear, false,),
+            Err(TraceRenderError::NonFinitePresentationParameter)
+        );
+    }
+
+    #[test]
+    fn a_wide_single_row_reverse_scan_observes_cancellation() {
+        let width = 2_000_000_u32;
+        let rgba = vec![255_u8; width as usize * 4];
+        let cancellation = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            render_reverse_highlight_with_cancellation(
+                &rgba,
+                width,
+                1,
+                [0.5, 0.5],
+                0.1,
+                ScopeSpace::Ryb,
+                DensityScale::Linear,
+                &worker_cancellation,
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        cancellation.store(true, Ordering::Relaxed);
+        assert_eq!(
+            worker.join().expect("reverse scan worker does not panic"),
+            None
         );
     }
 }

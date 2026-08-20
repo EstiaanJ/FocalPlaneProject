@@ -17,11 +17,9 @@ These questions are deliberately unanswered. They should remain visible until ex
 
 4. Does push-to-update mean that controls change the pending parameters immediately but Focal Editor renders the preview only when the user presses an Update button?
 
-5. While editing decoded PNG and JPEG files, should prototype white balance be a simple warmth-and-tint operation, with physically meaningful RAW temperature and tint deferred until RAW support?
+5. Which specific wide-gamut scene-referred working space, encoding, and complete input/display/export path should replace the canonical Adobe RGB MVP domain for the proper RAW implementation? Adobe RGB is settled for the MVP; it is not the final scene-referred architecture.
 
-6. Which specific wide-gamut scene-referred working space, encoding, and complete input/display/export path should replace the canonical Adobe RGB MVP domain for the proper RAW implementation? Adobe RGB is settled for the MVP; it is not the final scene-referred architecture.
-
-7. What preview approximations are acceptable, and how will we measure when a fast preview differs too much from the final render?
+6. What preview approximations are acceptable, and how will we measure when a fast preview differs too much from the final render?
 
 
 

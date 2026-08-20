@@ -17,6 +17,8 @@
 
 use std::{fmt, sync::OnceLock};
 
+use crate::CancellationToken;
+
 pub const SCOPE_RESOLUTION: usize = 512;
 const MAX_SAMPLES: usize = 1_000_000;
 const CIE_X_MAX: f32 = 0.8;
@@ -40,7 +42,11 @@ const RYB_HUE_KNOTS: [f32; 7] = [
     1.0,
 ];
 static RGB_TO_RYB_SECOND_DERIVATIVES: OnceLock<[f32; 7]> = OnceLock::new();
-static RYB_TO_RGB_SECOND_DERIVATIVES: OnceLock<[f32; 7]> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeInputContract {
+    EncodedSrgb8,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VectorscopeAnalysis {
@@ -78,6 +84,8 @@ pub enum ScopeError {
     NonFiniteRegion,
     NegativeCircleRadius,
     ReversedRectangle,
+    ZeroDimension,
+    Cancelled,
 }
 
 impl fmt::Display for ScopeError {
@@ -101,6 +109,8 @@ impl fmt::Display for ScopeError {
                 write!(formatter, "scope circle radius must not be negative")
             }
             Self::ReversedRectangle => write!(formatter, "scope rectangle bounds must be ordered"),
+            Self::ZeroDimension => write!(formatter, "scope image dimensions must be non-zero"),
+            Self::Cancelled => write!(formatter, "scope analysis was cancelled"),
         }
     }
 }
@@ -108,8 +118,22 @@ impl fmt::Display for ScopeError {
 impl std::error::Error for ScopeError {}
 
 #[must_use]
-pub fn analyse(rgba: &[u8], width: u32, height: u32, resolution: usize) -> VectorscopeAnalysis {
-    analyse_region_in_space(rgba, width, height, resolution, None, ScopeSpace::Ryb)
+pub fn analyse(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    resolution: usize,
+    contract: ScopeInputContract,
+) -> VectorscopeAnalysis {
+    analyse_region_in_space(
+        rgba,
+        width,
+        height,
+        resolution,
+        None,
+        ScopeSpace::Ryb,
+        contract,
+    )
 }
 
 #[must_use]
@@ -119,8 +143,17 @@ pub fn analyse_region(
     height: u32,
     resolution: usize,
     region: Option<AnalysisRegion>,
+    contract: ScopeInputContract,
 ) -> VectorscopeAnalysis {
-    analyse_region_in_space(rgba, width, height, resolution, region, ScopeSpace::Ryb)
+    analyse_region_in_space(
+        rgba,
+        width,
+        height,
+        resolution,
+        region,
+        ScopeSpace::Ryb,
+        contract,
+    )
 }
 
 #[must_use]
@@ -129,8 +162,17 @@ pub fn analyse_cie1931(
     width: u32,
     height: u32,
     resolution: usize,
+    contract: ScopeInputContract,
 ) -> VectorscopeAnalysis {
-    analyse_region_in_space(rgba, width, height, resolution, None, ScopeSpace::Cie1931)
+    analyse_region_in_space(
+        rgba,
+        width,
+        height,
+        resolution,
+        None,
+        ScopeSpace::Cie1931,
+        contract,
+    )
 }
 
 /// Analyses an RGBA image, panicking only through the compatibility wrapper
@@ -149,9 +191,19 @@ pub fn analyse_region_in_space(
     resolution: usize,
     region: Option<AnalysisRegion>,
     space: ScopeSpace,
+    contract: ScopeInputContract,
 ) -> VectorscopeAnalysis {
-    try_analyse_region_in_space(rgba, width, height, resolution, region, space)
-        .expect("valid vectorscope analysis inputs")
+    try_analyse_region_in_space(
+        rgba,
+        width,
+        height,
+        resolution,
+        region,
+        space,
+        contract,
+        &CancellationToken::new(),
+    )
+    .expect("valid vectorscope analysis inputs")
 }
 
 /// Fallible vectorscope analysis for untrusted image and region boundaries.
@@ -160,6 +212,7 @@ pub fn analyse_region_in_space(
 ///
 /// Returns [`ScopeError`] when the resolution, dimensions, pixel buffer, or
 /// selected region is invalid.
+#[allow(clippy::too_many_arguments)]
 pub fn try_analyse_region_in_space(
     rgba: &[u8],
     width: u32,
@@ -167,6 +220,8 @@ pub fn try_analyse_region_in_space(
     resolution: usize,
     region: Option<AnalysisRegion>,
     space: ScopeSpace,
+    _contract: ScopeInputContract,
+    cancellation: &CancellationToken,
 ) -> Result<VectorscopeAnalysis, ScopeError> {
     validate_inputs(rgba, width, height, resolution, region)?;
     let width = usize::try_from(width).map_err(|_| ScopeError::DimensionOverflow)?;
@@ -187,6 +242,9 @@ pub fn try_analyse_region_in_space(
 
     for block_y in (region_min_y..region_max_y).step_by(stride) {
         for block_x in (region_min_x..region_max_x).step_by(stride) {
+            if cancellation.is_cancelled() {
+                return Err(ScopeError::Cancelled);
+            }
             let end_y = (block_y + stride).min(height);
             let end_x = (block_x + stride).min(width);
             let mut rgb = [0.0_f32; 3];
@@ -260,6 +318,9 @@ fn validate_inputs(
 ) -> Result<(), ScopeError> {
     if resolution <= 1 {
         return Err(ScopeError::ResolutionTooSmall { actual: resolution });
+    }
+    if width == 0 || height == 0 {
+        return Err(ScopeError::ZeroDimension);
     }
     let expected = usize::try_from(width)
         .ok()
@@ -461,6 +522,7 @@ fn scope_max_radius(space: ScopeSpace) -> f32 {
 /// Panics when the image dimensions, pixel buffer, or selection centre is
 /// invalid. Use [`try_render_reverse_highlight`] for untrusted inputs.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn render_reverse_highlight(
     rgba: &[u8],
     width: u32,
@@ -469,9 +531,20 @@ pub fn render_reverse_highlight(
     radius: f32,
     space: ScopeSpace,
     density_scale: DensityScale,
+    contract: ScopeInputContract,
 ) -> Vec<u8> {
-    try_render_reverse_highlight(rgba, width, height, centre, radius, space, density_scale)
-        .expect("valid reverse-highlight inputs")
+    try_render_reverse_highlight(
+        rgba,
+        width,
+        height,
+        centre,
+        radius,
+        space,
+        density_scale,
+        contract,
+        &CancellationToken::new(),
+    )
+    .expect("valid reverse-highlight inputs")
 }
 
 /// Fallible form of [`render_reverse_highlight`].
@@ -480,6 +553,7 @@ pub fn render_reverse_highlight(
 ///
 /// Returns [`ScopeError`] when the image dimensions, pixel buffer, or
 /// selection centre is invalid.
+#[allow(clippy::too_many_arguments)]
 pub fn try_render_reverse_highlight(
     rgba: &[u8],
     width: u32,
@@ -488,6 +562,8 @@ pub fn try_render_reverse_highlight(
     radius: f32,
     space: ScopeSpace,
     density_scale: DensityScale,
+    _contract: ScopeInputContract,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, ScopeError> {
     validate_inputs(rgba, width, height, 2, None)?;
     if !centre[0].is_finite() || !centre[1].is_finite() || !radius.is_finite() {
@@ -500,8 +576,13 @@ pub fn try_render_reverse_highlight(
     let height = usize::try_from(height).map_err(|_| ScopeError::DimensionOverflow)?;
     let radius = radius.max(0.000_1);
     let mut output = vec![0_u8; rgba.len()];
+    let mut processed = 0_usize;
     for y in 0..height {
         for x in 0..width {
+            if processed.is_multiple_of(4_096) && cancellation.is_cancelled() {
+                return Err(ScopeError::Cancelled);
+            }
+            processed += 1;
             let index = (y * width + x) * 4;
             let alpha = f32::from(rgba[index + 3]) / 255.0;
             if alpha <= f32::EPSILON {
@@ -547,14 +628,18 @@ pub fn rgb_hue_to_ryb_hue(hue: f32) -> f32 {
 /// Maps RYB hue back to standard RGB hue for the display ring.
 #[must_use]
 pub fn ryb_hue_to_rgb_hue(hue: f32) -> f32 {
-    let second_derivatives = RYB_TO_RGB_SECOND_DERIVATIVES
-        .get_or_init(|| natural_spline_second_derivatives(&RYB_HUE_KNOTS, &RGB_HUE_KNOTS));
-    cubic_spline(
-        hue.rem_euclid(1.0),
-        &RYB_HUE_KNOTS,
-        &RGB_HUE_KNOTS,
-        second_derivatives,
-    )
+    let target = hue.rem_euclid(1.0);
+    let mut low = 0.0_f32;
+    let mut high = 1.0_f32;
+    for _ in 0..24 {
+        let middle = (low + high) * 0.5;
+        if rgb_hue_to_ryb_hue(middle) < target {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    (low + high) * 0.5
 }
 
 fn srgb_to_linear(value: f32) -> f32 {
@@ -721,6 +806,111 @@ fn normalise_density(bins: &[f32], sampled_pixels: usize, size: usize) -> Vec<f3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn analyse(rgba: &[u8], width: u32, height: u32, resolution: usize) -> VectorscopeAnalysis {
+        super::analyse(
+            rgba,
+            width,
+            height,
+            resolution,
+            ScopeInputContract::EncodedSrgb8,
+        )
+    }
+
+    fn analyse_region(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        resolution: usize,
+        region: Option<AnalysisRegion>,
+    ) -> VectorscopeAnalysis {
+        super::analyse_region(
+            rgba,
+            width,
+            height,
+            resolution,
+            region,
+            ScopeInputContract::EncodedSrgb8,
+        )
+    }
+
+    fn analyse_cie1931(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        resolution: usize,
+    ) -> VectorscopeAnalysis {
+        super::analyse_cie1931(
+            rgba,
+            width,
+            height,
+            resolution,
+            ScopeInputContract::EncodedSrgb8,
+        )
+    }
+
+    fn render_reverse_highlight(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        centre: [f32; 2],
+        radius: f32,
+        space: ScopeSpace,
+        scale: DensityScale,
+    ) -> Vec<u8> {
+        super::render_reverse_highlight(
+            rgba,
+            width,
+            height,
+            centre,
+            radius,
+            space,
+            scale,
+            ScopeInputContract::EncodedSrgb8,
+        )
+    }
+
+    fn try_render_reverse_highlight(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        centre: [f32; 2],
+        radius: f32,
+        space: ScopeSpace,
+        scale: DensityScale,
+    ) -> Result<Vec<u8>, ScopeError> {
+        super::try_render_reverse_highlight(
+            rgba,
+            width,
+            height,
+            centre,
+            radius,
+            space,
+            scale,
+            ScopeInputContract::EncodedSrgb8,
+            &CancellationToken::new(),
+        )
+    }
+
+    fn try_analyse_region_in_space(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        resolution: usize,
+        region: Option<AnalysisRegion>,
+        space: ScopeSpace,
+    ) -> Result<VectorscopeAnalysis, ScopeError> {
+        super::try_analyse_region_in_space(
+            rgba,
+            width,
+            height,
+            resolution,
+            region,
+            space,
+            ScopeInputContract::EncodedSrgb8,
+            &CancellationToken::new(),
+        )
+    }
 
     #[test]
     fn neutral_pixels_land_at_centre() {
@@ -913,6 +1103,14 @@ mod tests {
             })
         );
         assert_eq!(
+            try_analyse_region_in_space(&[], 0, 1, 33, None, ScopeSpace::Ryb),
+            Err(ScopeError::ZeroDimension)
+        );
+        assert_eq!(
+            try_analyse_region_in_space(&[], 1, 0, 33, None, ScopeSpace::Ryb),
+            Err(ScopeError::ZeroDimension)
+        );
+        assert_eq!(
             try_analyse_region_in_space(
                 &[0; 4],
                 1,
@@ -926,5 +1124,63 @@ mod tests {
             ),
             Err(ScopeError::ReversedRectangle)
         );
+    }
+
+    #[test]
+    fn forward_and_reverse_scans_observe_preexisting_cancellation() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert_eq!(
+            super::try_analyse_region_in_space(
+                &[255, 0, 0, 255],
+                1,
+                1,
+                33,
+                None,
+                ScopeSpace::Ryb,
+                ScopeInputContract::EncodedSrgb8,
+                &cancellation,
+            ),
+            Err(ScopeError::Cancelled)
+        );
+        assert_eq!(
+            super::try_render_reverse_highlight(
+                &[255, 0, 0, 255],
+                1,
+                1,
+                [0.5, 0.5],
+                0.1,
+                ScopeSpace::Ryb,
+                DensityScale::Linear,
+                ScopeInputContract::EncodedSrgb8,
+                &cancellation,
+            ),
+            Err(ScopeError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn scope_analysis_requires_an_explicit_srgb_byte_contract() {
+        let analysis = super::try_analyse_region_in_space(
+            &[128, 128, 128, 255],
+            1,
+            1,
+            33,
+            None,
+            ScopeSpace::Ryb,
+            ScopeInputContract::EncodedSrgb8,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(analysis.sampled_pixels, 1);
+    }
+
+    #[test]
+    fn ryb_mapping_round_trips_between_knots() {
+        for index in 0..=1_000 {
+            let hue = index as f32 / 1_001.0;
+            let round_trip = ryb_hue_to_rgb_hue(rgb_hue_to_ryb_hue(hue));
+            assert!((round_trip - hue).abs() < 1.0e-5, "hue={hue}");
+        }
     }
 }

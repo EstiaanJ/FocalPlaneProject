@@ -104,6 +104,32 @@ The first production FocalCore integration includes only:
 
 Do not port Linear, Bezier, or derivative editing into Focal Editor or production FocalCore yet. Preserve their experimental source in FocalCurve. Influence-radius curve editing is explicitly deferred until after MVP.
 
+## Decoded-image white balance, local contrast, and noise reduction
+
+The PNG/JPEG path exposes **Warmth** and **Tint**, not Kelvin temperature. These controls derive validated opponent-channel gains in linear Adobe RGB while preserving the lightness of a neutral input. Physical temperature/tint derived from camera metadata remains part of the later RAW pipeline.
+
+Local Contrast is a global spatial adjustment, not a masked local adjustment. Its first CPU-reference implementation follows the simple RawTherapee model: derive perceptual Adobe RGB luma, subtract a Gaussian-like blurred base, scale the detail, and add it back while preserving encoded RGB ratios. Focal Editor initially exposes Amount and Radius only.
+
+Decoded-image Noise Reduction remains useful after RAW support arrives and is distinct from future camera-profiled RAW denoising. It exposes Luminance and Colour strengths and uses an edge-aware filter guided by perceptual Adobe RGB luma. It must not claim camera-profiled or automatic noise modelling.
+
+The approved relative order is:
+
+```text
+White balance
+→ Exposure
+→ Decoded-image noise reduction
+→ Contrast and tonal curve
+→ Local contrast
+→ Saturation and creative colour
+→ Sharpening
+```
+
+These decisions were approved by the human owner on 2026-08-20 after comparison with darktable and RawTherapee.
+
+The decoded-image Saturation control follows RawTherapee's useful asymmetric HSV behaviour: negative values scale saturation directly, while positive values approach a nonlinear protected target so already saturated colours change less. As in RawTherapee's Exposure-panel implementation, FocalCore applies it directly to linear working RGB and preserves HSV value. RTSet comparisons remain the evidence for validating this behaviour rather than a requirement for byte-identical RawTherapee output.
+
+RTSet fixtures validate the implementation but do not define arbitrary fitted mappings. The decoded-image contrast reference uses RawTherapee's linear working-space luminance histogram, sRGB transfer-function curve domain, mean-derived toe and shoulder construction, and two quadratic Bézier/NURBS sub-curves. Saturation retains the documented slider value without a fitted multiplier. Differences caused by RawTherapee operating in the PP3 working profile (ProPhoto in the current fixtures) versus FocalCore's canonical Adobe RGB domain must be reported and resolved as an explicit colour decision rather than hidden in slider calibration.
+
 ## Render execution contract
 
 FocalCore rendering needs a shared execution context containing at least:
@@ -116,6 +142,10 @@ FocalCore rendering needs a shared execution context containing at least:
 Modules must check cancellation often enough that obsolete work normally stops within **150 ms** on the target system. This is a latency budget, not permission to block the GUI. The GUI thread never performs image processing.
 
 Progress must describe the current request and must not allow progress from a stale request to replace the newest state. Preview and Export use the same processing meaning and module order; quality may select documented approximations or resolution.
+
+Interactive preview rendering must never process the full-resolution source merely because it is available. The editor prepares and caches a source sized for the physical pixels available to the photo view, then applies exposure, curves, colour, and other processing to that bounded source. A typical large photograph should therefore require roughly display-resolution work rather than 25–40 MP work for every slider update. Export alone applies the accepted immutable edit snapshot to the full-resolution source.
+
+Zoom does not remove this bound. The editor selects the corresponding source-image region and resamples that region to the physical pixel dimensions of the preview, using source pixels up to a native display ratio of 1:1 where available. Images smaller than the preview are processed at their original dimensions and enlarged for presentation with nearest-neighbour sampling; they must not be upsampled before adjustment processing.
 
 ## Saved edit state
 
@@ -134,6 +164,8 @@ Whether an edit retains a live preset reference or embeds a frozen preset snapsh
 ## Geometry
 
 Crop is deferred. Do not design or implement crop, resize-as-edit, orientation controls, masks, or other local/geometry editing as part of the first vertical slice.
+
+The first vertical slice is complete, and crop is now assigned to MVP Phase One. The editable crop rectangle rotates around its own centre independently of the displayed image, and its overlay and handles must show that rotation before application. FocalCore samples the correspondingly rotated rectangle only after the crop is confirmed. A crop which would extend outside the original image is uniformly reduced around its centre, preserving its aspect ratio, rather than silently changing its proportions or inventing corner pixels.
 
 File orientation is not an edit control: it is interpreted once by `focal-io` at decode time so every application sees the same displayed image.
 

@@ -19,6 +19,7 @@ Start with [[FocalPlane]] for the purpose, values, application boundaries, and i
 - [[Focal Core Pipeline]] — modular processing order and preview execution
 - [[Presets and Saved Edits]] — editable documents, exports, presets, and copied settings
 - [[Sliders]] — controls and interaction principles
+- [[Decoded Image Corrections]] — decoded-image white balance, local contrast, and denoising research
 - [[FocalLib]] — later library-management workflow
 - [[Testing]] — correctness and reproducibility
 - [[Engineering Principles]] — development standards and human-directed decisions

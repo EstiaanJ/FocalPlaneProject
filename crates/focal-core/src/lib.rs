@@ -9,6 +9,7 @@ mod execution;
 mod image;
 mod module;
 mod pipeline;
+mod processing;
 pub mod scope;
 
 pub use curve::{
@@ -21,8 +22,8 @@ pub use execution::{
 pub use image::{
     ChannelMeaning, ColourEncoding, Image, ImageContract, ImageError, Primaries, WhitePoint,
 };
-pub use module::{Module, ModuleKind, ModuleParameters};
+pub use module::{CropSettings, Module, ModuleKind, ModuleParameters};
 pub use pipeline::{
-    Pipeline, PipelineError, PipelineSnapshot, RenderReport, RenderStageReport, RenderStageStatus,
-    WorkingSpace,
+    PIPELINE_VERSION, Pipeline, PipelineError, PipelineSnapshot, RenderReport, RenderStageReport,
+    RenderStageStatus, WorkingSpace,
 };

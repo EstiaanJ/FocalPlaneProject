@@ -414,6 +414,7 @@ impl BetterPlotsApp {
         let hover = analyses.hover.clone();
         let render = |analysis: &VectorscopeAnalysis, inverse| {
             render_trace(analysis, settings.0, settings.1, settings.2, inverse)
+                .expect("application-owned vectorscope analysis is structurally valid")
         };
         let full_texture = full.as_ref().map(|analysis| {
             context.load_texture(
@@ -811,7 +812,10 @@ impl BetterPlotsApp {
         let centre = response
             .hover_pos()
             .and_then(|pointer| area.coordinate(pointer));
-        let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+        let scroll = scope_scroll_delta(
+            response.hovered(),
+            ui.input(|input| input.smooth_scroll_delta.y),
+        );
         if scroll.abs() > f32::EPSILON {
             self.reverse_radius = (self.reverse_radius * (scroll / 120.0).exp()).clamp(0.002, 0.25);
         }
@@ -1101,7 +1105,12 @@ impl eframe::App for BetterPlotsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.poll_loader(&context);
-        if self.loading {
+        if background_analysis_needs_repaint([
+            self.loading,
+            self.hover_request.is_some(),
+            self.rectangle_request.is_some(),
+            self.reverse_request.is_some(),
+        ]) {
             context.request_repaint();
         }
 
@@ -1362,6 +1371,14 @@ fn resize_rect(original: ImageRect, handle: RectHandle, point: [f32; 2]) -> Imag
     }
 }
 
+fn scope_scroll_delta(hovered: bool, delta: f32) -> f32 {
+    if hovered { delta } else { 0.0 }
+}
+
+fn background_analysis_needs_repaint(states: [bool; 4]) -> bool {
+    states.into_iter().any(|state| state)
+}
+
 fn configure_visuals(context: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BACKGROUND;
@@ -1426,5 +1443,25 @@ mod tests {
         let sense = scope_sense();
         assert!(sense.senses_click());
         assert!(!sense.senses_drag());
+    }
+
+    #[test]
+    fn scope_scroll_is_ignored_when_the_scope_is_not_hovered() {
+        assert!(scope_scroll_delta(false, 120.0).abs() < f32::EPSILON);
+        assert!((scope_scroll_delta(true, 120.0) - 120.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn pending_analysis_keeps_event_polling_alive() {
+        assert!(background_analysis_needs_repaint([
+            false, true, false, false
+        ]));
+        assert!(background_analysis_needs_repaint([
+            false, false, true, false
+        ]));
+        assert!(background_analysis_needs_repaint([
+            false, false, false, true
+        ]));
+        assert!(!background_analysis_needs_repaint([false; 4]));
     }
 }

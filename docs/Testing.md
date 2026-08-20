@@ -33,6 +33,8 @@ A superseded preview must stop doing useful work within **150 ms** under support
 
 The 150 ms target is a cancellation-latency contract, not permission to block the UI thread.
 
+Interactive preview tests must prove that large decoded sources are replaced by a cached, display-bounded render source before adjustment processing, while Export selects the untouched full-resolution source. Keep this as a boundary regression test: testing only the downsampling calculation is insufficient because the original performance regression was caused by routing the correct full-resolution buffer into the wrong render path. Zoom tests must likewise prove that only the visible source region is resampled to the physical preview dimensions, and small-image tests must prove that nearest-neighbour enlargement happens after original-size processing.
+
 ## Reproducible edit state
 
 Under tightly controlled conditions, loading the same starting image and the same saved edit state should export identical pixels and stable metadata, apart from deliberately volatile fields such as creation time.

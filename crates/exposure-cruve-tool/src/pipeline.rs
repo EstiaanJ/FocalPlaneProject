@@ -37,19 +37,39 @@ pub enum PipelineError {
     Image(ImageError),
     UnsupportedFormat,
     InvalidDimensions,
+    InvalidPixelCount { expected: usize, actual: usize },
+    NonFinitePixel,
+    TransparencyNeedsConfirmation,
     PngEncode(png::EncodingError),
 }
 
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(error) => write!(formatter, "could not read image: {error}"),
+            Self::Io(error) => write!(formatter, "image file operation failed: {error}"),
             Self::Image(error) => write!(formatter, "image decode failed: {error}"),
             Self::UnsupportedFormat => write!(formatter, "only PNG and JPEG images are supported"),
             Self::InvalidDimensions => write!(formatter, "image dimensions are invalid"),
+            Self::InvalidPixelCount { expected, actual } => {
+                write!(
+                    formatter,
+                    "image dimensions require {expected} pixels, received {actual}"
+                )
+            }
+            Self::NonFinitePixel => write!(formatter, "image contains a non-finite channel"),
+            Self::TransparencyNeedsConfirmation => write!(
+                formatter,
+                "image contains transparency; confirm flattening before continuing"
+            ),
             Self::PngEncode(error) => write!(formatter, "PNG encode failed: {error}"),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AlphaPolicy {
+    RejectTransparency,
+    FlattenOver([f32; 3]),
 }
 
 impl std::error::Error for PipelineError {}
@@ -180,12 +200,22 @@ pub struct RenderedPreview {
     pub duration_ms: u128,
 }
 
-pub fn decode_image_file(path: &Path) -> Result<SourceImage, PipelineError> {
+pub fn decode_image_file_with_alpha(
+    path: &Path,
+    alpha_policy: AlphaPolicy,
+) -> Result<SourceImage, PipelineError> {
     let bytes = std::fs::read(path).map_err(PipelineError::Io)?;
-    decode_image_bytes(&bytes)
+    decode_image_bytes_with_alpha(&bytes, alpha_policy)
 }
 
 pub fn decode_image_bytes(bytes: &[u8]) -> Result<SourceImage, PipelineError> {
+    decode_image_bytes_with_alpha(bytes, AlphaPolicy::RejectTransparency)
+}
+
+pub fn decode_image_bytes_with_alpha(
+    bytes: &[u8],
+    alpha_policy: AlphaPolicy,
+) -> Result<SourceImage, PipelineError> {
     let image_format = image::guess_format(bytes).map_err(PipelineError::Image)?;
     let format = match image_format {
         ImageFormat::Png => InputFormat::Png,
@@ -253,17 +283,25 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Result<SourceImage, PipelineError> {
     image.apply_orientation(orientation);
     let dimensions = (image.width(), image.height());
     let bit_depth = bit_depth(image.color());
-    let image_buffer = image.to_rgb32f();
+    let image_buffer = image.to_rgba32f();
     let pixels = image_buffer
         .pixels()
         .map(|pixel| {
-            [
-                pixel[0].clamp(0.0, 1.0),
-                pixel[1].clamp(0.0, 1.0),
-                pixel[2].clamp(0.0, 1.0),
-            ]
+            let alpha = pixel[3].clamp(0.0, 1.0);
+            if alpha < 1.0 && alpha_policy == AlphaPolicy::RejectTransparency {
+                return Err(PipelineError::TransparencyNeedsConfirmation);
+            }
+            let background = match alpha_policy {
+                AlphaPolicy::RejectTransparency => [0.0; 3],
+                AlphaPolicy::FlattenOver(background) => background,
+            };
+            Ok([
+                (pixel[0] * alpha + background[0] * (1.0 - alpha)).clamp(0.0, 1.0),
+                (pixel[1] * alpha + background[1] * (1.0 - alpha)).clamp(0.0, 1.0),
+                (pixel[2] * alpha + background[2] * (1.0 - alpha)).clamp(0.0, 1.0),
+            ])
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(SourceImage {
         width: dimensions.0,
@@ -275,7 +313,10 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Result<SourceImage, PipelineError> {
     })
 }
 
-pub fn prepare(source: &SourceImage, input_colour_space: InputColourSpace) -> PreparedImage {
+pub fn prepare(
+    source: &SourceImage,
+    input_colour_space: InputColourSpace,
+) -> Result<PreparedImage, PipelineError> {
     prepare_pixels(
         source.width,
         source.height,
@@ -287,7 +328,10 @@ pub fn prepare(source: &SourceImage, input_colour_space: InputColourSpace) -> Pr
     )
 }
 
-pub fn reprepare(source: &PreparedImage, input_colour_space: InputColourSpace) -> PreparedImage {
+pub fn reprepare(
+    source: &PreparedImage,
+    input_colour_space: InputColourSpace,
+) -> Result<PreparedImage, PipelineError> {
     prepare_pixels(
         source.width,
         source.height,
@@ -307,7 +351,8 @@ fn prepare_pixels(
     format: InputFormat,
     bit_depth: u8,
     input_colour_space: InputColourSpace,
-) -> PreparedImage {
+) -> Result<PreparedImage, PipelineError> {
+    validate_pixels(width, height, &source_pixels)?;
     let mut curve_domain = Vec::with_capacity(source_pixels.len());
     let mut before_rgba = Vec::with_capacity(source_pixels.len() * 4);
     for encoded in source_pixels.iter().copied() {
@@ -322,7 +367,7 @@ fn prepare_pixels(
         ]);
     }
 
-    PreparedImage {
+    Ok(PreparedImage {
         width,
         height,
         curve_domain,
@@ -332,7 +377,31 @@ fn prepare_pixels(
         format,
         bit_depth,
         input_colour_space,
+    })
+}
+
+fn validate_pixels(width: u32, height: u32, pixels: &[[f32; 3]]) -> Result<(), PipelineError> {
+    if width == 0 || height == 0 {
+        return Err(PipelineError::InvalidDimensions);
     }
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(PipelineError::InvalidDimensions)?;
+    if pixels.len() != expected {
+        return Err(PipelineError::InvalidPixelCount {
+            expected,
+            actual: pixels.len(),
+        });
+    }
+    if pixels.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(PipelineError::NonFinitePixel);
+    }
+    Ok(())
 }
 
 pub fn render<F: FnMut(f32)>(
@@ -341,6 +410,10 @@ pub fn render<F: FnMut(f32)>(
     cancelled: &AtomicBool,
     mut progress: F,
 ) -> Option<RenderedPreview> {
+    validate_pixels(prepared.width, prepared.height, &prepared.curve_domain).ok()?;
+    if prepared.before_rgba.len() != prepared.curve_domain.len().checked_mul(4)? {
+        return None;
+    }
     let started = std::time::Instant::now();
     let mut after_rgba = Vec::with_capacity(prepared.curve_domain.len() * 4);
     let mut input_histogram = Histogram::new(snapshot.histogram_calculation);
@@ -377,6 +450,9 @@ pub fn render<F: FnMut(f32)>(
         }
     }
     progress(1.0);
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
 
     Some(RenderedPreview {
         width: prepared.width,
@@ -387,6 +463,11 @@ pub fn render<F: FnMut(f32)>(
         output_histogram,
         duration_ms: started.elapsed().as_millis(),
     })
+}
+
+pub fn write_srgb_png(path: &Path, preview: &RenderedPreview) -> Result<(), PipelineError> {
+    let bytes = encode_srgb_png(preview)?;
+    std::fs::write(path, bytes).map_err(PipelineError::Io)
 }
 
 pub fn encode_srgb_png(preview: &RenderedPreview) -> Result<Vec<u8>, PipelineError> {
@@ -538,7 +619,8 @@ fn parse_exif_ifd(
         }
         let tag = read_u16(bytes, entry, little_endian)?;
         let value_type = read_u16(bytes, entry + 2, little_endian)?;
-        if tag == 0xA001 && value_type == 3 {
+        let value_count = read_u32(bytes, entry + 4, little_endian)?;
+        if tag == 0xA001 && value_type == 3 && value_count == 1 {
             return match read_u16(bytes, entry + 8, little_endian)? {
                 1 => Some(InputColourSpace::Srgb),
                 2 => Some(InputColourSpace::AdobeRgb),
@@ -658,9 +740,13 @@ mod tests {
 
     use super::{
         HistogramCalculation, InputColourSpace, InputFormat, LuminanceDefinition, PipelineSnapshot,
-        decode_image_bytes, encode_srgb_png, prepare, render,
+        PreparedImage, SourceImage, decode_image_bytes, encode_srgb_png, render,
     };
     use crate::curve::{CurveMode, CurveSet};
+
+    fn prepare(source: &SourceImage, colour_space: InputColourSpace) -> PreparedImage {
+        super::prepare(source, colour_space).expect("valid test source prepares")
+    }
 
     #[test]
     fn controlled_fixture_is_sixteen_bit_and_profiled() {
@@ -857,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn histograms_use_rec709_luminance_for_all_curve_modes() {
+    fn histograms_use_adobe_rgb_luma_for_the_canonical_curve_domain() {
         let source = super::SourceImage {
             width: 2,
             height: 1,
@@ -892,7 +978,7 @@ mod tests {
             .enumerate()
             .filter_map(|(index, count)| (*count > 0.0).then_some(index))
             .collect();
-        assert_eq!(occupied, vec![75, 89]);
+        assert_eq!(occupied, vec![77, 85]);
     }
 
     #[test]
@@ -945,5 +1031,137 @@ mod tests {
             prepared.curve_domain[0][0] < prepared.curve_domain[1][0],
             "premature sRGB gamut clipping makes distinct Adobe RGB reds identical before the user curve"
         );
+    }
+
+    #[test]
+    fn final_progress_cancellation_does_not_publish_a_preview() {
+        let source = decode_image_bytes(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/controlled_adobe_rgb.png"
+        )))
+        .unwrap();
+        let prepared = prepare(&source, InputColourSpace::AdobeRgb);
+        let cancelled = AtomicBool::new(false);
+        let snapshot = PipelineSnapshot {
+            mode: CurveMode::LinkedRgb,
+            curves: CurveSet::default(),
+            luminance: LuminanceDefinition::AdobeRgb,
+            interpolation: crate::curve::CurveInterpolation::Smooth,
+            histogram_calculation: HistogramCalculation::FullResolution,
+        };
+        let result = render(&prepared, &snapshot, &cancelled, |fraction| {
+            if (fraction - 1.0).abs() < f32::EPSILON {
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn transparent_input_requires_confirmation_and_can_flatten_over_white() {
+        use png::{BitDepth, ColorType, Encoder};
+
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[255, 0, 0, 0]).unwrap();
+        }
+        assert!(matches!(
+            decode_image_bytes(&bytes),
+            Err(super::PipelineError::TransparencyNeedsConfirmation)
+        ));
+        let flattened =
+            super::decode_image_bytes_with_alpha(&bytes, super::AlphaPolicy::FlattenOver([1.0; 3]))
+                .unwrap();
+        assert_eq!(flattened.pixels.as_slice(), &[[1.0; 3]]);
+    }
+
+    #[test]
+    fn malformed_exif_colour_space_count_is_rejected() {
+        let tiff = [
+            b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, // header and one entry
+            0x01, 0xA0, 3, 0, 2, 0, 0, 0, 1, 0, 0, 0, // SHORT count=2
+            0, 0, 0, 0,
+        ];
+        assert_eq!(super::detect_exif_colour_space(&tiff), None);
+    }
+
+    #[test]
+    fn preparation_rejects_inconsistent_and_non_finite_source_pixels() {
+        let source = super::SourceImage {
+            width: 2,
+            height: 1,
+            pixels: std::sync::Arc::new(vec![[0.0; 3]]),
+            profile: super::EmbeddedProfile {
+                label: "test".to_owned(),
+                byte_length: 0,
+                detected_colour_space: Some(InputColourSpace::Srgb),
+                detection_source: "test".to_owned(),
+            },
+            format: InputFormat::Png,
+            bit_depth: 8,
+        };
+        assert!(matches!(
+            super::prepare(&source, InputColourSpace::Srgb),
+            Err(super::PipelineError::InvalidPixelCount {
+                expected: 2,
+                actual: 1
+            })
+        ));
+        let mut non_finite = source;
+        non_finite.width = 1;
+        non_finite.pixels = std::sync::Arc::new(vec![[f32::NAN; 3]]);
+        assert!(matches!(
+            super::prepare(&non_finite, InputColourSpace::Srgb),
+            Err(super::PipelineError::NonFinitePixel)
+        ));
+
+        let malformed = super::PreparedImage {
+            width: 2,
+            height: 1,
+            curve_domain: vec![[0.0; 3]],
+            before_rgba: vec![0; 4],
+            source_pixels: std::sync::Arc::new(vec![[0.0; 3]]),
+            profile: non_finite.profile,
+            format: InputFormat::Png,
+            bit_depth: 8,
+            input_colour_space: InputColourSpace::Srgb,
+        };
+        let snapshot = PipelineSnapshot {
+            mode: CurveMode::LinkedRgb,
+            curves: CurveSet::default(),
+            luminance: LuminanceDefinition::AdobeRgb,
+            interpolation: crate::curve::CurveInterpolation::Smooth,
+            histogram_calculation: HistogramCalculation::FullResolution,
+        };
+        assert!(render(&malformed, &snapshot, &AtomicBool::new(false), |_| {}).is_none());
+    }
+
+    #[test]
+    fn explicit_export_destination_reports_filesystem_errors() {
+        let preview = super::RenderedPreview {
+            width: 1,
+            height: 1,
+            before_rgba: vec![0, 0, 0, 255],
+            after_rgba: vec![0, 0, 0, 255],
+            input_histogram: super::Histogram {
+                bins: vec![0.0; super::HISTOGRAM_BINS],
+                approximate: true,
+                calculation: HistogramCalculation::FullResolution,
+            },
+            output_histogram: super::Histogram {
+                bins: vec![0.0; super::HISTOGRAM_BINS],
+                approximate: true,
+                calculation: HistogramCalculation::FullResolution,
+            },
+            duration_ms: 0,
+        };
+        assert!(matches!(
+            super::write_srgb_png(&std::env::temp_dir(), &preview),
+            Err(super::PipelineError::Io(_))
+        ));
     }
 }

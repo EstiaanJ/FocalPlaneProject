@@ -10,6 +10,7 @@ eframe.workspace = true
 focal-core.workspace = true
 focal-plot.workspace = true
 image.workspace = true
+moxcms.workspace = true
 rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true

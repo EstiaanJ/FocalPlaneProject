@@ -253,11 +253,7 @@ impl CurveSet {
                 let adjusted = self.luma.evaluate(luma);
                 if luma > 0.0 {
                     let scale = adjusted / luma;
-                    [
-                        (rgb[0] * scale).clamp(0.0, 1.0),
-                        (rgb[1] * scale).clamp(0.0, 1.0),
-                        (rgb[2] * scale).clamp(0.0, 1.0),
-                    ]
+                    [rgb[0] * scale, rgb[1] * scale, rgb[2] * scale]
                 } else {
                     [adjusted; 3]
                 }

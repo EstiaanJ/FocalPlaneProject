@@ -19,6 +19,8 @@ This is still a rewrite. The old processing pipeline and film-photography model 
 
 ## Initial GUI slice
 
+This vertical slice is implemented. The list below records its original scope rather than limiting subsequently approved work.
+
 The first implementation follows [[Focal-Editor Old GUI]] and is deliberately narrow:
 
 - open one PNG or JPEG directly, without an import or catalogue step;

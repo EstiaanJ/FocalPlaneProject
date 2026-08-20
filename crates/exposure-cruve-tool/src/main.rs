@@ -22,7 +22,13 @@ fn main() -> eframe::Result {
         .profile
         .detected_colour_space
         .unwrap_or(InputColourSpace::Srgb);
-    let prepared = prepare(&source, input_colour_space);
+    let prepared = match prepare(&source, input_colour_space) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!("Unable to prepare controlled curve fixture: {error}");
+            return Err(eframe::Error::AppCreation(Box::new(error)));
+        }
+    };
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Exposure Curve Tool")
