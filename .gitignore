@@ -6,18 +6,18 @@ target/
 # Obsidian's local UI state is not project documentation.
 .obsidian/
 
-# Large test inputs are local by default. Keep only reviewed, small fixtures.
+# Images are local assets and are not committed.
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.tif
+*.tiff
+*.bmp
+*.ico
+*.svg
+
+# Large test inputs are local by default.
 /test-image/*
 !/test-image/README.md
-!/test-image/psf.png
-!/test-image/neutral_gray.png
-!/test-image/color_patches.png
-!/test-image/gradients.png
-!/test-image/slanted-edge-check.png
-!/test-image/slanted_edge_mtf.png
-!/test-image/test.jpg
-!/test-image/test.png
-!/test-image/mtf.png
-!/test-image/pure_chroma.png
-!/test-image/frequency_sweep_mtf.png
-
