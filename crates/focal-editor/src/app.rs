@@ -20,7 +20,7 @@ use std::{
 use eframe::egui::{
     self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
 };
-use focal_core::{CropSettings, Image, PIPELINE_VERSION};
+use focal_core::{CancellationToken, ClippingWarnings, CropSettings, Image, PIPELINE_VERSION};
 use focal_plot::vectorscope::{
     CIE1931_LOCUS, DensityScale, ScopeSpace, VectorscopeAnalysis, render_trace, ring_colour,
 };
@@ -42,13 +42,16 @@ const ACCENT: Color32 = Color32::from_rgb(117, 181, 230);
 const LEFT_RAIL_WIDTH: f32 = 190.0;
 const RIGHT_RAIL_WIDTH: f32 = 330.0;
 const FILMSTRIP_HEIGHT: f32 = 132.0;
-const TOOLBAR_HEIGHT: f32 = 48.0;
+const TOOLBAR_HEIGHT: f32 = 38.0;
 const PROCESSING_BAR_HEIGHT: f32 = 32.0;
 const PREVIEW_MAX_PIXELS: usize = 1_000_000;
 const LOUPE_SIZE: f32 = 180.0;
 const LOUPE_ZOOM: f32 = 4.0;
 const HIGHLIGHT_CLIP_COLOUR: Color32 = Color32::from_rgb(255, 48, 48);
 const LOWLIGHT_CLIP_COLOUR: Color32 = Color32::from_rgb(48, 128, 255);
+const PROCESSING_LOADING_COLOUR: Color32 = Color32::from_rgb(220, 169, 72);
+const PROCESSING_READY_COLOUR: Color32 = Color32::from_rgb(89, 170, 112);
+const PROCESSING_RENDERING_COLOUR: Color32 = Color32::from_rgb(117, 181, 230);
 // A deliberately generous hit target keeps the splitters usable at dense
 // desktop sizes. The painted centre line remains subtle, but the whole strip
 // can be grabbed with the pointer.
@@ -140,9 +143,13 @@ pub struct FocalEditorApp {
     latest_generation: u64,
     thumbnail_generation: u64,
     pending_thumbnails: usize,
+    thumbnail_cancellation: CancellationToken,
+    load_cancellation: Option<CancellationToken>,
     loading: bool,
     rendering: bool,
     exporting: bool,
+    export_generation: Option<u64>,
+    export_cancellation: Option<CancellationToken>,
     scoping: bool,
     render_progress: f32,
     source_path: Option<PathBuf>,
@@ -151,6 +158,7 @@ pub struct FocalEditorApp {
     preview_sampling: PreviewSampling,
     texture_sampling: PreviewSampling,
     output: Option<Image>,
+    output_clipping: Option<ClippingWarnings>,
     before_preview: Option<Image>,
     output_generation: Option<u64>,
     source_texture: Option<TextureHandle>,
@@ -184,6 +192,7 @@ pub struct FocalEditorApp {
     show_lowlight_clipping: bool,
     white_balance_picker: bool,
     copied_edits: Option<Adjustments>,
+    paste_after_load: bool,
     cie_scope_texture: Option<TextureHandle>,
     ryb_scope_texture: Option<TextureHandle>,
     film_strip: Vec<FilmStripItem>,
@@ -221,9 +230,13 @@ impl FocalEditorApp {
             latest_generation: 0,
             thumbnail_generation: 0,
             pending_thumbnails: 0,
+            thumbnail_cancellation: CancellationToken::new(),
+            load_cancellation: None,
             loading: false,
             rendering: false,
             exporting: false,
+            export_generation: None,
+            export_cancellation: None,
             scoping: false,
             render_progress: 0.0,
             source_path: None,
@@ -232,6 +245,7 @@ impl FocalEditorApp {
             preview_sampling: PreviewSampling::full(1, 1),
             texture_sampling: PreviewSampling::full(1, 1),
             output: None,
+            output_clipping: None,
             before_preview: None,
             output_generation: None,
             source_texture: None,
@@ -265,6 +279,7 @@ impl FocalEditorApp {
             show_lowlight_clipping: false,
             white_balance_picker: false,
             copied_edits: None,
+            paste_after_load: false,
             cie_scope_texture: None,
             ryb_scope_texture: None,
             film_strip: Vec::new(),
@@ -277,7 +292,11 @@ impl FocalEditorApp {
             status: "Ready — open a PNG, JPEG, or TIFF to begin".to_owned(),
         };
 
-        if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
+        if let Some(path) = std::env::args_os()
+            .nth(1)
+            .map(PathBuf::from)
+            .filter(|path| is_supported_image_path(path))
+        {
             app.open_path(path);
         }
         app
@@ -286,6 +305,9 @@ impl FocalEditorApp {
     fn open_path(&mut self, path: PathBuf) {
         self.preview_worker.cancel();
         self.scope_worker.cancel();
+        self.invalidate_load();
+        self.invalidate_export();
+        self.paste_after_load = false;
         self.next_generation = self.next_generation.saturating_add(1);
         self.latest_load_generation = self.next_generation;
         // Invalidate every result belonging to the previously selected image.
@@ -296,6 +318,7 @@ impl FocalEditorApp {
         self.rendering = false;
         self.output_generation = None;
         self.output = None;
+        self.output_clipping = None;
         self.before_preview = None;
         self.pending_transparency = None;
         self.status = format!("Opening {}…", path.display());
@@ -304,10 +327,15 @@ impl FocalEditorApp {
             .send(LoadRequest {
                 generation: self.latest_load_generation,
                 operation: LoadOperation::Decode(path),
+                cancellation: {
+                    let cancellation = CancellationToken::new();
+                    self.load_cancellation = Some(cancellation.clone());
+                    cancellation
+                },
             })
             .is_err()
         {
-            self.loading = false;
+            self.invalidate_load();
             self.status = "The image loader is unavailable".to_owned();
         }
     }
@@ -327,6 +355,8 @@ impl FocalEditorApp {
             return;
         }
 
+        self.thumbnail_cancellation.cancel();
+        self.thumbnail_cancellation = CancellationToken::new();
         self.thumbnail_generation = self.latest_load_generation;
         self.pending_thumbnails = 0;
         self.film_strip = reconcile_film_strip(std::mem::take(&mut self.film_strip), paths);
@@ -346,6 +376,7 @@ impl FocalEditorApp {
             if !self.load_result_is_current(result.generation) {
                 continue;
             }
+            self.load_cancellation = None;
             self.loading = false;
             match result.image {
                 Ok(image) if image.has_transparency => {
@@ -398,6 +429,7 @@ impl FocalEditorApp {
                     match image {
                         Ok(frame) => {
                             self.texture_sampling = frame.sampling;
+                            let clipping = frame.clipping;
                             let image = frame.after;
                             self.source_texture = Some(context.load_texture(
                                 format!("focal-editor-before-{generation}"),
@@ -424,6 +456,7 @@ impl FocalEditorApp {
                                 })
                                 .is_ok();
                             self.output = Some(image);
+                            self.output_clipping = clipping;
                             self.output_generation = Some(generation);
                             self.rebuild_output_texture(context, generation);
                             self.status = "Preview updated".to_owned();
@@ -446,7 +479,12 @@ impl FocalEditorApp {
         }
 
         while let Ok(result) = self.export_receiver.try_recv() {
+            if !self.export_result_is_current(result.generation) {
+                continue;
+            }
             self.exporting = false;
+            self.export_generation = None;
+            self.export_cancellation = None;
             match result.result {
                 Ok(()) => {
                     self.last_export_directory =
@@ -505,6 +543,7 @@ impl FocalEditorApp {
                 image.pixels(),
                 image.width(),
                 image.height(),
+                self.output_clipping.as_ref(),
                 self.show_highlight_clipping,
                 self.show_lowlight_clipping,
             ),
@@ -518,6 +557,8 @@ impl FocalEditorApp {
 
     fn install_image(&mut self, path: PathBuf, image: DecodedImage, context: &egui::Context) {
         let display_path = path.display().to_string();
+        let paste_after_load = self.paste_after_load;
+        self.paste_after_load = false;
         self.source_path = Some(path);
         self.sidecar_path = None;
         self.source_histogram = None;
@@ -528,6 +569,7 @@ impl FocalEditorApp {
         self.scoping = false;
         self.source_texture = None;
         self.output_texture = None;
+        self.output_clipping = None;
         self.before_preview = None;
         self.source_core = image.to_core_image().ok().map(Arc::new);
         let [preview_width, preview_height] =
@@ -550,7 +592,12 @@ impl FocalEditorApp {
         self.crop_mode = CropMode::Inactive;
         self.crop_aspect_lock = AspectLock::Free;
         self.preview_view = PreviewView::default();
-        self.status = format!("Loaded {display_path}");
+        if paste_after_load && let Some(adjustments) = self.copied_edits {
+            self.set_adjustments(adjustments);
+            self.status = format!("Loaded {display_path}; pasted edits");
+        } else {
+            self.status = format!("Loaded {display_path}");
+        }
         self.request_preview(context);
     }
 
@@ -590,10 +637,15 @@ impl FocalEditorApp {
                         .send(LoadRequest {
                             generation: self.latest_load_generation,
                             operation: LoadOperation::FlattenOntoBlack { path, image },
+                            cancellation: {
+                                let cancellation = CancellationToken::new();
+                                self.load_cancellation = Some(cancellation.clone());
+                                cancellation
+                            },
                         })
                         .is_err()
                     {
-                        self.loading = false;
+                        self.invalidate_load();
                         self.status = "The image loader is unavailable".to_owned();
                     }
                 }
@@ -604,6 +656,7 @@ impl FocalEditorApp {
     }
 
     fn request_preview(&mut self, context: &egui::Context) {
+        self.invalidate_export();
         let Some(source) = self.preview_render_source() else {
             return;
         };
@@ -820,19 +873,44 @@ impl FocalEditorApp {
         };
         let source = (**source).clone();
         self.status = "Rendering full-resolution export…".to_owned();
+        self.invalidate_export();
+        let cancellation = CancellationToken::new();
         self.exporting = true;
+        self.export_generation = Some(self.latest_generation);
+        self.export_cancellation = Some(cancellation.clone());
         if self
             .export_sender
             .send(ExportRequest {
+                generation: self.latest_generation,
                 path: path.to_path_buf(),
                 source,
                 snapshot: preview::snapshot_with_adjustments(self.adjustments()),
+                cancellation,
             })
             .is_err()
         {
-            self.exporting = false;
+            self.invalidate_export();
             self.status = "The export worker is unavailable".to_owned();
         }
+    }
+
+    fn invalidate_export(&mut self) {
+        if let Some(cancellation) = self.export_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.export_generation = None;
+        self.exporting = false;
+    }
+
+    fn invalidate_load(&mut self) {
+        if let Some(cancellation) = self.load_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.loading = false;
+    }
+
+    fn export_result_is_current(&self, generation: u64) -> bool {
+        self.export_generation == Some(generation)
     }
 
     fn can_export(&self) -> bool {
@@ -906,7 +984,7 @@ impl eframe::App for FocalEditorApp {
                         .right_rail_width
                         .clamp(240.0, (ui.available_width() - 180.0).max(240.0));
                     let centre_width =
-                        (ui.available_width() - right_width - RESIZER_THICKNESS).max(120.0);
+                        centre_panel_width(ui.available_width(), right_width, RESIZER_THICKNESS);
                     let picked = ui
                         .allocate_ui_with_layout(
                             Vec2::new(centre_width, ui.available_height()),
@@ -967,23 +1045,6 @@ impl FocalEditorApp {
             self.save_sidecar();
         }
         if left
-            .add_enabled(has_image, egui::Button::new("Copy edits"))
-            .on_hover_text("Copy the current absolute edits for another photo")
-            .clicked()
-        {
-            self.copy_edits();
-        }
-        if left
-            .add_enabled(
-                has_image && self.copied_edits.is_some(),
-                egui::Button::new("Paste edits"),
-            )
-            .on_hover_text("Paste the copied absolute edits onto this photo")
-            .clicked()
-        {
-            self.paste_edits(ui.ctx());
-        }
-        if left
             .add_enabled(self.can_export(), egui::Button::new("Export"))
             .on_hover_text("Render the current preview to an 8-bit sRGB PNG")
             .clicked()
@@ -1033,8 +1094,6 @@ impl FocalEditorApp {
     }
 
     fn show_left_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.heading("Navigator");
-        ui.add_space(4.0);
         let navigator_height = self
             .navigator_height
             .clamp(90.0, (ui.available_height() - 120.0).max(90.0));
@@ -1198,6 +1257,7 @@ impl FocalEditorApp {
             processing_height,
             self.loading,
             self.rendering,
+            self.exporting,
             self.render_progress,
         );
     }
@@ -1332,8 +1392,6 @@ impl FocalEditorApp {
     }
 
     fn show_controls(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.heading("Controls");
-        ui.label(egui::RichText::new("Global controls").weak());
         let input_label = self.source.as_ref().map_or("No image", |source| {
             if source.input_contract == focal_core::ImageContract::ADOBE_RGB_CURVE {
                 "ICC-managed input → Adobe RGB working input"
@@ -1353,20 +1411,19 @@ impl FocalEditorApp {
             .changed();
         clipping_changed |= ui
             .checkbox(&mut self.show_lowlight_clipping, "Lowlight clipping")
-            .on_hover_text("Mark pixels with one or more channels at display black")
+            .on_hover_text("Mark pixels whose display lightness reaches black")
             .changed();
-        if ui
-            .selectable_label(self.white_balance_picker, "Pick white balance")
-            .on_hover_text("Click a neutral pixel in the photo to set warmth and tint")
-            .clicked()
-        {
-            self.white_balance_picker = !self.white_balance_picker;
-        }
         if clipping_changed && let Some(generation) = self.output_generation {
             self.rebuild_output_texture(context, generation);
         }
         ui.add_space(8.0);
         ui.label(egui::RichText::new("White balance").strong());
+        if white_balance_picker_button(ui, self.white_balance_picker)
+            .on_hover_text("Sample white balance from a neutral area of the photo")
+            .clicked()
+        {
+            self.white_balance_picker = !self.white_balance_picker;
+        }
         let warmth_changed = parameter_row(
             ui,
             "Warmth",
@@ -1405,24 +1462,30 @@ impl FocalEditorApp {
             0.1,
             "Temporary FocalCore contrast control",
         );
-        let local_contrast_changed = parameter_row(
-            ui,
-            "Local contrast",
-            &mut self.local_contrast_amount,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "Strength of lightness detail around the selected radius",
-        );
-        let local_radius_changed = parameter_row(
-            ui,
-            "Local radius",
-            &mut self.local_contrast_radius,
-            1.0..=256.0,
-            80.0,
-            1.0,
-            "Lightness-detail radius in preview pixels",
-        );
+        let mut local_contrast_changed = false;
+        let mut local_radius_changed = false;
+        egui::CollapsingHeader::new("Local Contrast")
+            .default_open(true)
+            .show(ui, |ui| {
+                local_contrast_changed = parameter_row(
+                    ui,
+                    "amount",
+                    &mut self.local_contrast_amount,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Strength of lightness detail around the selected radius",
+                );
+                local_radius_changed = parameter_row(
+                    ui,
+                    "radius",
+                    &mut self.local_contrast_radius,
+                    1.0..=256.0,
+                    80.0,
+                    1.0,
+                    "Lightness-detail radius in preview pixels",
+                );
+            });
         let saturation_changed = parameter_row(
             ui,
             "Saturation",
@@ -1468,27 +1531,56 @@ impl FocalEditorApp {
 
     fn show_film_strip(&mut self, ui: &mut egui::Ui, _context: &egui::Context) {
         ui.horizontal(|ui| {
-            ui.heading("Film Strip");
             if !self.film_strip.is_empty() {
                 ui.label(egui::RichText::new(format!("{} photos", self.film_strip.len())).weak());
             }
         });
         let mut selected = None;
+        let mut copy_requested = false;
+        let mut paste_target = None;
+        let has_image = self.source.is_some();
+        let has_copied_edits = self.copied_edits.is_some();
         let mut visible_indices = Vec::new();
         egui::ScrollArea::horizontal()
             .id_salt("focal-editor-film-strip")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (index, item) in self.film_strip.iter_mut().enumerate() {
-                        let is_selected = self.source_path.as_ref() == Some(&item.path);
-                        let response = film_strip_item(ui, item, is_selected);
+                    for index in 0..self.film_strip.len() {
+                        let is_selected = self
+                            .source_path
+                            .as_ref()
+                            .is_some_and(|path| path == &self.film_strip[index].path);
+                        let (response, path) = {
+                            let item = &mut self.film_strip[index];
+                            let response = film_strip_item(ui, item, is_selected);
+                            (response, item.path.clone())
+                        };
                         if response.rect.intersects(ui.clip_rect()) {
                             visible_indices.push(index);
                         }
                         if response.clicked() {
-                            selected = Some(item.path.clone());
+                            selected = Some(path.clone());
                         }
+                        response.context_menu(|ui| {
+                            if ui
+                                .add_enabled(has_image, egui::Button::new("Copy edits"))
+                                .clicked()
+                            {
+                                copy_requested = true;
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    has_image && has_copied_edits,
+                                    egui::Button::new("Paste edits"),
+                                )
+                                .clicked()
+                            {
+                                paste_target = Some(path.clone());
+                                ui.close();
+                            }
+                        });
                     }
                 });
             });
@@ -1511,6 +1603,7 @@ impl FocalEditorApp {
                 .send(ThumbnailRequest {
                     generation: self.thumbnail_generation,
                     path: path.clone(),
+                    cancellation: self.thumbnail_cancellation.clone(),
                 })
                 .is_ok()
             {
@@ -1519,10 +1612,25 @@ impl FocalEditorApp {
                 item.thumbnail_requested = false;
             }
         }
+        if copy_requested {
+            self.copy_edits();
+        }
+        if let Some(path) = paste_target {
+            self.paste_to_path(path, ui.ctx());
+        }
         if let Some(path) = selected
             && self.source_path.as_ref() != Some(&path)
         {
             self.open_path(path);
+        }
+    }
+
+    fn paste_to_path(&mut self, path: PathBuf, context: &egui::Context) {
+        if self.source_path.as_ref() == Some(&path) {
+            self.paste_edits(context);
+        } else {
+            self.open_path(path);
+            self.paste_after_load = true;
         }
     }
 
@@ -1717,6 +1825,9 @@ impl FocalEditorApp {
         let mut picked = None;
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, CornerRadius::ZERO, PREVIEW_BACKGROUND);
+        if white_balance_picker && response.hovered() {
+            ui.set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
         if response.hovered() {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
@@ -1745,9 +1856,10 @@ impl FocalEditorApp {
             )
         });
         if let (Some(texture), Some(image_rect)) = (texture, image_rect) {
+            let texture_rect = sampled_texture_rect(image_rect, texture_sampling);
             painter.image(
                 texture.id(),
-                sampled_texture_rect(image_rect, texture_sampling),
+                texture_rect,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
@@ -1864,15 +1976,16 @@ impl FocalEditorApp {
                 && response.clicked()
                 && let (Some(pointer), Some((pixels, dimensions))) =
                     (response.interact_pointer_pos(), picker_pixels)
+                && texture_rect.contains(pointer)
             {
-                picked = sample_pixel_at(pointer, image_rect, pixels, dimensions);
+                picked = sample_pixel_at(pointer, texture_rect, pixels, dimensions);
             }
             if loupe_enabled
                 && response.hovered()
                 && let Some(pointer) = response.hover_pos()
-                && image_rect.contains(pointer)
+                && texture_rect.contains(pointer)
             {
-                draw_loupe(&painter, rect, image_rect, texture, pointer);
+                draw_loupe(&painter, rect, texture_rect, texture, pointer);
             }
         } else if response.hovered() {
             painter.text(
@@ -2157,6 +2270,7 @@ fn show_processing_bar(
     height: f32,
     loading: bool,
     rendering: bool,
+    exporting: bool,
     progress: f32,
 ) {
     let (rect, _) = ui.allocate_exact_size(
@@ -2168,10 +2282,12 @@ fn show_processing_bar(
     if height < 1.0 {
         return;
     }
-    let (fraction, label) = processing_bar_state(loading, rendering, progress);
+    let (fraction, label) = processing_bar_state(loading, rendering, exporting, progress);
+    let colour = processing_bar_colour(loading, rendering || exporting);
     let bar_rect = rect.shrink2(Vec2::new(8.0, 10.0));
     let bar = egui::ProgressBar::new(fraction)
         .desired_width(bar_rect.width())
+        .fill(colour)
         .text(label)
         .animate(fraction < 1.0);
     ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
@@ -2179,14 +2295,73 @@ fn show_processing_bar(
     });
 }
 
-fn processing_bar_state(loading: bool, rendering: bool, progress: f32) -> (f32, &'static str) {
+fn processing_bar_state(
+    loading: bool,
+    rendering: bool,
+    exporting: bool,
+    progress: f32,
+) -> (f32, &'static str) {
     if loading {
         (0.25, "Loading…")
     } else if rendering {
-        (progress.clamp(0.0, 1.0), "Rendering…")
+        (progress.clamp(0.0, 1.0), "Processing…")
+    } else if exporting {
+        (0.25, "Processing…")
     } else {
         (1.0, "Ready")
     }
+}
+
+const fn processing_bar_colour(loading: bool, rendering: bool) -> Color32 {
+    if loading {
+        PROCESSING_LOADING_COLOUR
+    } else if rendering {
+        PROCESSING_RENDERING_COLOUR
+    } else {
+        PROCESSING_READY_COLOUR
+    }
+}
+
+fn centre_panel_width(available: f32, right_width: f32, splitter: f32) -> f32 {
+    // The left splitter has already been allocated by the caller. Only the
+    // splitter immediately before the right rail remains in this width.
+    (available - right_width - splitter).max(0.0)
+}
+
+fn white_balance_picker_button(ui: &mut egui::Ui, selected: bool) -> egui::Response {
+    let button = egui::Button::new("").min_size(Vec2::splat(28.0));
+    let button = if selected {
+        button.fill(ACCENT.gamma_multiply(0.35))
+    } else {
+        button
+    };
+    let response = ui.add(button).on_hover_cursor(egui::CursorIcon::Crosshair);
+    let colour = if response.hovered() || selected {
+        ACCENT
+    } else {
+        ui.visuals().text_color()
+    };
+    let stroke = Stroke::new(1.6, colour);
+    let centre = response.rect.center();
+    let diagonal = Vec2::new(
+        std::f32::consts::FRAC_1_SQRT_2,
+        -std::f32::consts::FRAC_1_SQRT_2,
+    );
+    let perpendicular = Vec2::new(-diagonal.y, diagonal.x);
+    let body_start = centre - diagonal * 5.0;
+    let body_end = centre + diagonal * 5.0;
+    let painter = ui.painter();
+    painter.line_segment([body_start, body_end], stroke);
+    painter.line_segment(
+        [
+            body_end - perpendicular * 4.0,
+            body_end + perpendicular * 4.0,
+        ],
+        stroke,
+    );
+    painter.line_segment([body_start - diagonal * 4.0, body_start], stroke);
+    painter.circle_stroke(body_start, 3.0, stroke);
+    response
 }
 
 const fn background_work_needs_repaint(
@@ -2249,19 +2424,19 @@ fn discover_sibling_images(selected: &std::path::Path) -> Vec<PathBuf> {
     entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        matches!(
-                            extension.to_ascii_lowercase().as_str(),
-                            "png" | "jpg" | "jpeg" | "tif" | "tiff"
-                        )
-                    })
-        })
+        .filter(|path| path.is_file() && is_supported_image_path(path))
         .collect()
+}
+
+fn is_supported_image_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "tif" | "tiff"
+            )
+        })
 }
 
 fn reconcile_film_strip(existing: Vec<FilmStripItem>, paths: Vec<PathBuf>) -> Vec<FilmStripItem> {
@@ -2339,12 +2514,13 @@ fn rgba_image_with_clipping(
     pixels: &[[f32; 3]],
     width: u32,
     height: u32,
+    clipping: Option<&ClippingWarnings>,
     show_highlights: bool,
     show_lowlights: bool,
 ) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied(
         [width as usize, height as usize],
-        &rgba_bytes_with_clipping(pixels, show_highlights, show_lowlights),
+        &rgba_bytes_with_clipping_masks(pixels, clipping, show_highlights, show_lowlights),
     )
 }
 
@@ -2368,9 +2544,60 @@ fn rgba_bytes_with_clipping(
     pixels
         .iter()
         .flat_map(|pixel| {
-            let highlight = pixel.iter().any(|value| *value >= 1.0);
-            let lowlight = pixel.iter().any(|value| *value <= 0.0);
+            let highlight = display_pixel_is_highlight_clipped(*pixel);
+            let lowlight = display_pixel_is_lowlight_clipped(*pixel);
             let warning = match (show_highlights && highlight, show_lowlights && lowlight) {
+                (true, true) => Some(Color32::from_rgb(255, 48, 255)),
+                (true, false) => Some(HIGHLIGHT_CLIP_COLOUR),
+                (false, true) => Some(LOWLIGHT_CLIP_COLOUR),
+                (false, false) => None,
+            };
+            warning
+                .map_or_else(
+                    || pixel.map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8),
+                    |colour| [colour.r(), colour.g(), colour.b()],
+                )
+                .into_iter()
+                .chain(std::iter::once(u8::MAX))
+        })
+        .collect()
+}
+
+fn display_pixel_is_highlight_clipped(pixel: [f32; 3]) -> bool {
+    pixel.iter().any(|value| *value >= 1.0)
+}
+
+fn display_pixel_is_lowlight_clipped(pixel: [f32; 3]) -> bool {
+    let non_negative = pixel.map(|value| value.max(0.0));
+    let lightness =
+        0.212_6 * non_negative[0] + 0.715_2 * non_negative[1] + 0.072_2 * non_negative[2];
+    lightness <= 0.0
+}
+
+fn rgba_bytes_with_clipping_masks(
+    pixels: &[[f32; 3]],
+    clipping: Option<&ClippingWarnings>,
+    show_highlights: bool,
+    show_lowlights: bool,
+) -> Vec<u8> {
+    let Some(clipping) = clipping else {
+        return rgba_bytes_with_clipping(pixels, show_highlights, show_lowlights);
+    };
+    if clipping.width() as usize * clipping.height() as usize != pixels.len()
+        || clipping.highlights().len() != pixels.len()
+        || clipping.lowlights().len() != pixels.len()
+    {
+        return rgba_bytes_with_clipping(pixels, show_highlights, show_lowlights);
+    }
+
+    pixels
+        .iter()
+        .enumerate()
+        .flat_map(|(index, pixel)| {
+            let warning = match (
+                show_highlights && clipping.highlights()[index],
+                show_lowlights && clipping.lowlights()[index],
+            ) {
                 (true, true) => Some(Color32::from_rgb(255, 48, 255)),
                 (true, false) => Some(HIGHLIGHT_CLIP_COLOUR),
                 (false, true) => Some(LOWLIGHT_CLIP_COLOUR),
@@ -2564,7 +2791,11 @@ fn sample_pixel_at(
     dimensions: [u32; 2],
 ) -> Option<[f32; 3]> {
     let [width, height] = dimensions;
-    if width == 0 || height == 0 || pixels.len() < width as usize * height as usize {
+    if !image_rect.contains(position)
+        || width == 0
+        || height == 0
+        || pixels.len() < width as usize * height as usize
+    {
         return None;
     }
     let [x, y] = normalised_image_position(position, image_rect);
@@ -2593,10 +2824,11 @@ fn loupe_rect(bounds: Rect, pointer: Pos2, size: f32) -> Rect {
     candidate.translate(Vec2::new(shift_x, shift_y))
 }
 
-fn loupe_uv_rect(pointer: Pos2, image: Rect, loupe: Rect, zoom: f32) -> Rect {
-    let centre = normalised_image_position(pointer, image);
-    let span_x = (loupe.width() / image.width().max(1.0) / zoom.max(1.0)).clamp(0.0, 1.0);
-    let span_y = (loupe.height() / image.height().max(1.0) / zoom.max(1.0)).clamp(0.0, 1.0);
+fn loupe_uv_rect(pointer: Pos2, displayed_image: Rect, loupe: Rect, zoom: f32) -> Rect {
+    let centre = normalised_image_position(pointer, displayed_image);
+    let span_x = (loupe.width() / displayed_image.width().max(1.0) / zoom.max(1.0)).clamp(0.0, 1.0);
+    let span_y =
+        (loupe.height() / displayed_image.height().max(1.0) / zoom.max(1.0)).clamp(0.0, 1.0);
     let left = (centre[0] - span_x * 0.5).clamp(0.0, 1.0 - span_x);
     let top = (centre[1] - span_y * 0.5).clamp(0.0, 1.0 - span_y);
     Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + span_x, top + span_y))
@@ -2639,6 +2871,9 @@ fn draw_loupe(
     );
 }
 
+/// Maps a display-encoded sRGB sample into the editor's two bounded opponent
+/// controls. The picker intentionally samples the immutable Before
+/// preview, so it cannot feed an already-adjusted pixel back into the edit.
 fn white_balance_from_sample(sample: [f32; 3]) -> Option<(f32, f32)> {
     const MINIMUM: f32 = 1.0e-4;
     if sample
@@ -2990,8 +3225,39 @@ mod tests {
         assert_eq!(&highlights[0..4], &[0, 51, 77, 255]);
         assert_eq!(&highlights[4..8], &[255, 48, 48, 255]);
         let lowlights = rgba_bytes_with_clipping(&pixels, false, true);
-        assert_eq!(&lowlights[0..4], &[48, 128, 255, 255]);
+        assert_eq!(&lowlights[0..4], &[0, 51, 77, 255]);
         assert_eq!(&lowlights[4..8], &[51, 255, 77, 255]);
+    }
+
+    #[test]
+    fn clipping_masks_mark_white_and_black_after_the_output_transform() {
+        let source = Image::new(
+            3,
+            1,
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.5, 0.5, 0.5]],
+            focal_core::ImageContract::SRGB_DISPLAY,
+        )
+        .unwrap();
+        let context = focal_core::RenderContext::new(focal_core::RenderQuality::Preview);
+        let (rendered, report) = focal_core::Pipeline::default()
+            .render_with_context(source, &context, &mut |_| {})
+            .unwrap();
+        let clipping = report.clipping.as_ref();
+        let bytes = rgba_bytes_with_clipping_masks(rendered.pixels(), clipping, true, true);
+
+        assert_eq!(&bytes[0..4], &[48, 128, 255, 255]);
+        assert_eq!(&bytes[4..8], &[255, 48, 48, 255]);
+        assert_eq!(&bytes[8..12], &[128, 128, 127, 255]);
+    }
+
+    #[test]
+    fn clipping_fallback_does_not_mark_chromatic_highlights_as_lowlights() {
+        let pixels = [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]];
+        let bytes = rgba_bytes_with_clipping(&pixels, false, true);
+
+        assert_eq!(&bytes[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&bytes[4..8], &[0, 0, 255, 255]);
+        assert_eq!(&bytes[8..12], &[48, 128, 255, 255]);
     }
 
     #[test]
@@ -3021,8 +3287,28 @@ mod tests {
             sample_pixel_at(Pos2::new(100.0, 50.0), image, &pixels, [2, 2]),
             Some([1.0, 1.0, 1.0])
         );
+        let sampled = sampled_texture_rect(
+            image,
+            PreviewSampling {
+                left: 0.25,
+                top: 0.0,
+                right: 0.75,
+                bottom: 1.0,
+                width: 2,
+                height: 2,
+            },
+        );
+        let uv = loupe_uv_rect(
+            sampled.center(),
+            sampled,
+            Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)),
+            LOUPE_ZOOM,
+        );
+        assert!((uv.center().x - 0.5).abs() < f32::EPSILON);
+        assert!((uv.center().y - 0.5).abs() < f32::EPSILON);
         assert!(sample_pixel_at(Pos2::ZERO, image, &pixels[..3], [2, 2]).is_none());
         assert!(sample_pixel_at(Pos2::ZERO, image, &pixels, [0, 2]).is_none());
+        assert!(sample_pixel_at(Pos2::new(220.0, 50.0), sampled, &pixels, [2, 2]).is_none());
     }
 
     #[test]
@@ -3042,10 +3328,45 @@ mod tests {
 
     #[test]
     fn processing_bar_state_prioritises_loading_and_clamps_progress() {
-        assert_eq!(processing_bar_state(true, true, 0.8), (0.25, "Loading…"));
-        assert_eq!(processing_bar_state(false, true, -1.0), (0.0, "Rendering…"));
-        assert_eq!(processing_bar_state(false, true, 2.0), (1.0, "Rendering…"));
-        assert_eq!(processing_bar_state(false, false, 0.3), (1.0, "Ready"));
+        assert_eq!(
+            processing_bar_state(true, true, true, 0.8),
+            (0.25, "Loading…")
+        );
+        assert_eq!(
+            processing_bar_state(false, true, false, -1.0),
+            (0.0, "Processing…")
+        );
+        assert_eq!(
+            processing_bar_state(false, true, false, 2.0),
+            (1.0, "Processing…")
+        );
+        assert_eq!(
+            processing_bar_state(false, false, true, 0.3),
+            (0.25, "Processing…")
+        );
+        assert_eq!(
+            processing_bar_state(false, false, false, 0.3),
+            (1.0, "Ready")
+        );
+        assert_eq!(
+            processing_bar_colour(true, false),
+            PROCESSING_LOADING_COLOUR
+        );
+        assert_eq!(
+            processing_bar_colour(false, true),
+            PROCESSING_RENDERING_COLOUR
+        );
+        assert_eq!(processing_bar_colour(false, false), PROCESSING_READY_COLOUR);
+    }
+
+    #[test]
+    fn centre_panel_stays_inside_the_remaining_width() {
+        let available = 1_000.0;
+        let right = 330.0;
+        let splitter = 10.0;
+        let centre = centre_panel_width(available, right, splitter);
+        assert!((centre + right + splitter - available).abs() < f32::EPSILON);
+        assert!((centre_panel_width(300.0, 240.0, splitter) - 50.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3072,6 +3393,24 @@ mod tests {
         };
         app.set_adjustments(adjustments);
         assert_eq!(app.adjustments(), adjustments);
+    }
+
+    #[test]
+    fn pasting_to_another_filmstrip_item_waits_for_that_image_to_load() {
+        let context = egui::Context::default();
+        let mut app = FocalEditorApp::new(&context);
+        app.source_path = Some(PathBuf::from("source.jpg"));
+        app.copied_edits = Some(Adjustments {
+            exposure_stops: 1.0,
+            ..Adjustments::default()
+        });
+        let previous_load_generation = app.latest_load_generation;
+
+        app.paste_to_path(PathBuf::from("target.jpg"), &context);
+
+        assert!(app.paste_after_load);
+        assert!(app.latest_load_generation > previous_load_generation);
+        assert_eq!(app.source_path, Some(PathBuf::from("source.jpg")));
     }
 
     #[test]
@@ -3387,6 +3726,25 @@ mod tests {
         assert_ne!(app.latest_generation, 7);
         assert!(app.output.is_none());
         assert!(!app.can_export());
+    }
+
+    #[test]
+    fn a_new_preview_cancels_and_invalidates_an_export_request() {
+        let context = egui::Context::default();
+        let mut app = FocalEditorApp::new(&context);
+        let cancellation = CancellationToken::new();
+        app.exporting = true;
+        app.export_generation = Some(4);
+        app.export_cancellation = Some(cancellation.clone());
+        assert!(app.export_result_is_current(4));
+        assert!(!app.export_result_is_current(5));
+
+        app.request_preview(&context);
+
+        assert!(cancellation.is_cancelled());
+        assert!(!app.exporting);
+        assert_eq!(app.export_generation, None);
+        assert!(app.export_cancellation.is_none());
     }
 
     #[test]

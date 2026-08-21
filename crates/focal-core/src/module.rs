@@ -535,6 +535,29 @@ fn linear_adobe_rgb_to_srgb(rgb: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Reports pixels which reach the output display boundary. Highlight clipping
+/// remains channel-based, while low-light
+/// clipping is based on lightness so a bright saturated colour with zero in a
+/// secondary channel is not mistaken for a black pixel. This must be
+/// calculated before the transform clamps the values, otherwise the evidence
+/// of clipping is lost.
+pub(crate) fn output_clipping_masks(image: &Image) -> (Vec<bool>, Vec<bool>) {
+    image
+        .pixels()
+        .iter()
+        .map(|pixel| {
+            let linear_srgb = linear_adobe_rgb_to_srgb(*pixel);
+            let non_negative = linear_srgb.map(|value| value.max(0.0));
+            let lightness =
+                0.212_6 * non_negative[0] + 0.715_2 * non_negative[1] + 0.072_2 * non_negative[2];
+            (
+                linear_srgb.iter().any(|value| *value >= 1.0),
+                lightness <= 0.0,
+            )
+        })
+        .unzip()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

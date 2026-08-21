@@ -122,3 +122,17 @@ Thirty new issues were independently confirmed and corrected. Candidates 003, 01
 | FP-EDITOR-013 | Low | Failed thumbnail requests could never retry. | `app::tests::failed_thumbnail_decode_becomes_retryable` |
 
 Interactive preparation, histograms, processing, scopes, and export now stay off the GUI thread. Preview processing uses a display-bounded visible source region; export alone uses the untouched full-resolution source.
+
+## 2026-08-21 Phase Two feature review
+
+The Phase Two implementation was reviewed against [[Testing#Feature review checklist]] and the recurring boundary lessons above. These defects were found and fixed before the review was completed:
+
+| ID | Severity | Defect | Correction and active regression test |
+| --- | --- | --- | --- |
+| FP-EDITOR-014 | High | Loupe and white-balance sampling used the transformed full-image rectangle even when the preview texture represented only a zoomed visible source region. | Both now use the displayed sampled-texture rectangle; `app::tests::loupe_and_pixel_sampling_clamp_at_view_boundaries` covers sampled UVs and out-of-bounds sampling. |
+| FP-EDITOR-015 | Medium | The clipping fallback marked any pixel with a zero channel as low-light clipped, so chromatic highlights could be painted as black clipping. | Low-light fallback uses display lightness; `app::tests::clipping_fallback_does_not_mark_chromatic_highlights_as_lowlights` and `pipeline::tests::output_report_preserves_boundary_clipping_before_display_clamping` cover the regression. |
+| FP-EDITOR-016 | High | Full-resolution export results had no request identity or cancellation owner and could update editor state after the current image or edit snapshot had changed. | Export requests carry a generation and cancellation token; obsolete requests are cancelled and ignored. `app::tests::a_new_preview_cancels_and_invalidates_an_export_request` covers the state transition. |
+| FP-EDITOR-017 | Medium | The processing bar could report Ready while an asynchronous full-resolution export was active. | Export is represented as processing with the same processing colour; `app::tests::processing_bar_state_prioritises_loading_and_clamps_progress` covers loading, preview, export, and ready states. |
+| FP-EDITOR-018 | Medium | Image and thumbnail workers had stale-result rejection but no cancellation owner, allowing obsolete TIFF work to continue without a cooperative stop signal. | Load and thumbnail requests now carry cancellation tokens and check them at decode boundaries; `image_io::tests::cancelled_image_boundaries_stop_before_decode_or_flattening` covers the contract. |
+
+The same review added boundary coverage for TIFF orientation, embedded ICC, 16-bit precision, and transparency in `image_io::tests::tiff_orientation_is_applied_exactly_once_at_decode`, `image_io::tests::tiff_embedded_icc_profile_enters_the_canonical_adobe_boundary`, and `image_io::tests::tiff_decode_preserves_sixteen_bit_precision_and_transparency`.

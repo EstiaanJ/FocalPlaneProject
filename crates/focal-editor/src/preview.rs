@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use focal_core::{
-    CancellationToken, CropSettings, Image, ModuleParameters, Pipeline, PipelineError,
-    PipelineSnapshot, RenderContext, RenderProgress, RenderQuality,
+    CancellationToken, ClippingWarnings, CropSettings, Image, ModuleParameters, Pipeline,
+    PipelineError, PipelineSnapshot, RenderContext, RenderProgress, RenderQuality,
 };
 
 #[derive(Debug)]
@@ -43,6 +43,7 @@ impl PreviewSampling {
 pub struct PreviewFrame {
     pub before: Image,
     pub after: Image,
+    pub clipping: Option<ClippingWarnings>,
     pub sampling: PreviewSampling,
 }
 
@@ -175,9 +176,10 @@ fn render(work: WorkItem, event_sender: &Sender<PreviewEvent>) {
                 before_pipeline.render_with_context(sampled.clone(), &context, &mut |_| {})?;
             pipeline
                 .render_with_context(sampled, &context, &mut report_progress)
-                .map(|(after, _report)| PreviewFrame {
+                .map(|(after, report)| PreviewFrame {
                     before,
                     after,
+                    clipping: report.clipping,
                     sampling: work.request.sampling,
                 })
         },

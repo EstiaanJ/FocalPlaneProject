@@ -24,6 +24,6 @@ pub use image::{
 };
 pub use module::{CropSettings, Module, ModuleKind, ModuleParameters};
 pub use pipeline::{
-    PIPELINE_VERSION, Pipeline, PipelineError, PipelineSnapshot, RenderReport, RenderStageReport,
-    RenderStageStatus, WorkingSpace,
+    ClippingWarnings, PIPELINE_VERSION, Pipeline, PipelineError, PipelineSnapshot, RenderReport,
+    RenderStageReport, RenderStageStatus, WorkingSpace,
 };

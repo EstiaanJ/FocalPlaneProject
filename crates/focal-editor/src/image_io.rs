@@ -8,8 +8,8 @@ use std::{
 };
 
 use focal_core::{
-    ColourEncoding, Image, ImageContract, ImageError, Pipeline, PipelineSnapshot, RenderContext,
-    RenderQuality,
+    CancellationToken, ColourEncoding, Image, ImageContract, ImageError, Pipeline,
+    PipelineSnapshot, RenderContext, RenderQuality,
 };
 use image::{
     ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat,
@@ -43,13 +43,24 @@ impl DecodedImage {
 
     /// Flattens transparency onto black in linear light.
     #[must_use = "the image or flattening error must be handled"]
-    pub fn flatten_onto_black(mut self) -> Result<Self, ImageIoError> {
+    #[cfg(test)]
+    pub fn flatten_onto_black(self) -> Result<Self, ImageIoError> {
+        self.flatten_onto_black_with_cancellation(&CancellationToken::new())
+    }
+
+    fn flatten_onto_black_with_cancellation(
+        mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, ImageIoError> {
         for ((pixel, alpha), rgba) in self
             .pixels
             .iter_mut()
             .zip(self.alpha.iter().copied())
             .zip(self.rgba.chunks_exact_mut(4))
         {
+            if cancellation.is_cancelled() {
+                return Err(ImageIoError::Cancelled);
+            }
             for channel in pixel.iter_mut() {
                 let linear = decode_channel(*channel, self.input_contract.encoding) * alpha;
                 *channel = encode_channel(linear, self.input_contract.encoding);
@@ -63,12 +74,16 @@ impl DecodedImage {
     }
 }
 
-pub fn decode(path: &Path) -> Result<DecodedImage, ImageIoError> {
+fn decode_with_cancellation(
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> Result<DecodedImage, ImageIoError> {
     let bytes = std::fs::read(path).map_err(|source| ImageIoError::Open {
         path: path.to_path_buf(),
         source,
     })?;
-    decode_bytes(&bytes)
+    ensure_not_cancelled(cancellation)?;
+    decode_bytes_with_cancellation(&bytes, cancellation)
 }
 
 #[cfg(test)]
@@ -77,7 +92,16 @@ fn decoded_image_from_dynamic(image: &image::DynamicImage) -> DecodedImage {
         .expect("the built-in sRGB interpretation is valid")
 }
 
+#[cfg(test)]
 fn decode_bytes(bytes: &[u8]) -> Result<DecodedImage, ImageIoError> {
+    decode_bytes_with_cancellation(bytes, &CancellationToken::new())
+}
+
+fn decode_bytes_with_cancellation(
+    bytes: &[u8],
+    cancellation: &CancellationToken,
+) -> Result<DecodedImage, ImageIoError> {
+    ensure_not_cancelled(cancellation)?;
     let format = image::guess_format(bytes).map_err(ImageIoError::Decode)?;
     let (icc, orientation) = match format {
         ImageFormat::Jpeg => {
@@ -105,8 +129,11 @@ fn decode_bytes(bytes: &[u8]) -> Result<DecodedImage, ImageIoError> {
     };
     let mut image =
         image::load_from_memory_with_format(bytes, format).map_err(ImageIoError::Decode)?;
+    ensure_not_cancelled(cancellation)?;
     image.apply_orientation(orientation);
-    decoded_image_from_dynamic_with_profile(&image, icc.as_deref())
+    let decoded = decoded_image_from_dynamic_with_profile(&image, icc.as_deref())?;
+    ensure_not_cancelled(cancellation)?;
+    Ok(decoded)
 }
 
 fn decoded_image_from_dynamic_with_profile(
@@ -181,6 +208,7 @@ fn decoded_image_from_dynamic_with_profile(
 pub struct LoadRequest {
     pub generation: u64,
     pub operation: LoadOperation,
+    pub cancellation: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -207,6 +235,7 @@ pub struct Thumbnail {
 pub struct ThumbnailRequest {
     pub generation: u64,
     pub path: PathBuf,
+    pub cancellation: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -217,12 +246,15 @@ pub struct ThumbnailResult {
 }
 
 pub struct ExportRequest {
+    pub generation: u64,
     pub path: PathBuf,
     pub source: Image,
     pub snapshot: PipelineSnapshot,
+    pub cancellation: CancellationToken,
 }
 
 pub struct ExportResult {
+    pub generation: u64,
     pub path: PathBuf,
     pub result: Result<(), String>,
 }
@@ -234,16 +266,34 @@ pub fn spawn_exporter() -> (Sender<ExportRequest>, Receiver<ExportResult>) {
         .name("focal-editor-export".to_owned())
         .spawn(move || {
             while let Ok(request) = request_receiver.recv() {
+                let generation = request.generation;
                 let path = request.path;
+                let cancellation = request.cancellation;
                 let result = Pipeline::from_snapshot(request.snapshot)
                     .render_with_context(
                         request.source,
-                        &RenderContext::new(RenderQuality::Export),
+                        &RenderContext::with_cancellation(
+                            RenderQuality::Export,
+                            cancellation.clone(),
+                        ),
                         &mut |_| {},
                     )
                     .map_err(|error| error.to_string())
-                    .and_then(|(output, _)| encode_srgb_png(&path, &output));
-                if result_sender.send(ExportResult { path, result }).is_err() {
+                    .and_then(|(output, _)| {
+                        if cancellation.is_cancelled() {
+                            Err("export cancelled".to_owned())
+                        } else {
+                            encode_srgb_png(&path, &output)
+                        }
+                    });
+                if result_sender
+                    .send(ExportResult {
+                        generation,
+                        path,
+                        result,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -295,12 +345,13 @@ pub fn spawn_loader() -> (Sender<LoadRequest>, Receiver<LoadResult>) {
                 std::thread::spawn(move || {
                     let (path, image) = match request.operation {
                         LoadOperation::Decode(path) => {
-                            let image = decode(&path);
+                            let image = decode_with_cancellation(&path, &request.cancellation);
                             (path, image)
                         }
-                        LoadOperation::FlattenOntoBlack { path, image } => {
-                            (path, image.flatten_onto_black())
-                        }
+                        LoadOperation::FlattenOntoBlack { path, image } => (
+                            path,
+                            image.flatten_onto_black_with_cancellation(&request.cancellation),
+                        ),
                     };
                     let result = LoadResult {
                         generation: request.generation,
@@ -324,10 +375,11 @@ pub fn spawn_thumbnail_loader() -> (Sender<ThumbnailRequest>, Receiver<Thumbnail
             while let Ok(first) = request_receiver.recv() {
                 for request in newest_thumbnail_batch(first, &request_receiver) {
                     let path = request.path;
+                    let cancellation = request.cancellation;
                     let result = ThumbnailResult {
                         generation: request.generation,
                         path: path.clone(),
-                        image: decode_thumbnail(&path, 160),
+                        image: decode_thumbnail_with_cancellation(&path, 160, &cancellation),
                     };
                     if result_sender.send(result).is_err() {
                         return;
@@ -354,11 +406,21 @@ fn newest_thumbnail_batch(
     requests
 }
 
-pub fn decode_thumbnail(path: &Path, maximum_dimension: u32) -> Result<Thumbnail, ImageIoError> {
+#[cfg(test)]
+fn decode_thumbnail(path: &Path, maximum_dimension: u32) -> Result<Thumbnail, ImageIoError> {
+    decode_thumbnail_with_cancellation(path, maximum_dimension, &CancellationToken::new())
+}
+
+fn decode_thumbnail_with_cancellation(
+    path: &Path,
+    maximum_dimension: u32,
+    cancellation: &CancellationToken,
+) -> Result<Thumbnail, ImageIoError> {
     let bytes = std::fs::read(path).map_err(|source| ImageIoError::Open {
         path: path.to_path_buf(),
         source,
     })?;
+    ensure_not_cancelled(cancellation)?;
     let format = image::guess_format(&bytes).map_err(ImageIoError::Decode)?;
     let (orientation, icc) = match format {
         ImageFormat::Jpeg => {
@@ -388,6 +450,7 @@ pub fn decode_thumbnail(path: &Path, maximum_dimension: u32) -> Result<Thumbnail
     };
     let mut image =
         image::load_from_memory_with_format(&bytes, format).map_err(ImageIoError::Decode)?;
+    ensure_not_cancelled(cancellation)?;
     image.apply_orientation(orientation);
     let image = image
         .thumbnail(maximum_dimension, maximum_dimension)
@@ -395,6 +458,7 @@ pub fn decode_thumbnail(path: &Path, maximum_dimension: u32) -> Result<Thumbnail
     let width = image.width();
     let height = image.height();
     let rgba = display_rgba_from_source_pixels(&image.into_raw(), icc.as_deref())?;
+    ensure_not_cancelled(cancellation)?;
     Ok(Thumbnail {
         width,
         height,
@@ -511,6 +575,14 @@ fn to_byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), ImageIoError> {
+    if cancellation.is_cancelled() {
+        Err(ImageIoError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum ImageIoError {
     Open {
@@ -518,6 +590,7 @@ pub enum ImageIoError {
         source: io::Error,
     },
     Decode(image::ImageError),
+    Cancelled,
     UnsupportedFormat,
     ColourProfile(String),
 }
@@ -529,6 +602,7 @@ impl fmt::Display for ImageIoError {
                 write!(formatter, "could not open {}: {source}", path.display())
             }
             Self::Decode(source) => write!(formatter, "could not decode image: {source}"),
+            Self::Cancelled => formatter.write_str("image operation cancelled"),
             Self::UnsupportedFormat => {
                 write!(formatter, "only PNG, JPEG, and TIFF images are supported")
             }
@@ -564,6 +638,30 @@ mod tests {
         assert!(!flattened.has_transparency);
         assert_eq!(flattened.rgba, vec![188, 0, 0, 255]);
         assert!((flattened.pixels[0][0] - 0.736_65).abs() < 0.002);
+    }
+
+    #[test]
+    fn cancelled_image_boundaries_stop_before_decode_or_flattening() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert!(matches!(
+            decode_bytes_with_cancellation(&[], &cancellation),
+            Err(ImageIoError::Cancelled)
+        ));
+
+        let source = DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 128],
+            pixels: vec![[1.0, 0.0, 0.0]],
+            alpha: vec![0.5],
+            input_contract: ImageContract::SRGB_DISPLAY,
+            has_transparency: true,
+        };
+        assert!(matches!(
+            source.flatten_onto_black_with_cancellation(&cancellation),
+            Err(ImageIoError::Cancelled)
+        ));
     }
 
     #[test]
@@ -728,24 +826,106 @@ mod tests {
     }
 
     #[test]
+    fn tiff_decode_preserves_sixteen_bit_precision_and_transparency() {
+        let bytes = {
+            let mut cursor = Cursor::new(Vec::new());
+            let encoder = image::codecs::tiff::TiffEncoder::new(&mut cursor);
+            let samples = [32_768_u16, 0, 0, 32_768, 32_769, 0, 0, 65_535];
+            let bytes = samples
+                .into_iter()
+                .flat_map(u16::to_ne_bytes)
+                .collect::<Vec<_>>();
+            encoder
+                .write_image(&bytes, 2, 1, ExtendedColorType::Rgba16)
+                .unwrap();
+            cursor.into_inner()
+        };
+
+        let decoded = decode_bytes(&bytes).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        assert!(decoded.has_transparency);
+        assert!(decoded.alpha[0] < 1.0);
+        assert!(decoded.pixels[0][0] < decoded.pixels[1][0]);
+    }
+
+    #[test]
+    fn tiff_embedded_icc_profile_enters_the_canonical_adobe_boundary() {
+        let bytes = {
+            let mut cursor = Cursor::new(Vec::new());
+            let mut encoder = image::codecs::tiff::TiffEncoder::new(&mut cursor);
+            encoder
+                .set_icc_profile(ColorProfile::new_adobe_rgb().encode().unwrap())
+                .unwrap();
+            encoder
+                .write_image(&[128, 64, 32], 1, 1, ExtendedColorType::Rgb8)
+                .unwrap();
+            cursor.into_inner()
+        };
+
+        let decoded = decode_bytes(&bytes).unwrap();
+        assert_eq!(decoded.input_contract, ImageContract::ADOBE_RGB_CURVE);
+        assert_eq!(decoded.pixels.len(), 1);
+    }
+
+    #[test]
+    fn tiff_orientation_is_applied_exactly_once_at_decode() {
+        // A minimal little-endian 2x1 RGB TIFF with Orientation=6. The
+        // decoder must expose the oriented 1x2 image to the rest of the app.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II");
+        bytes.extend_from_slice(&42_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_u32.to_le_bytes());
+        bytes.extend_from_slice(&11_u16.to_le_bytes());
+        {
+            let mut entry = |tag: u16, kind: u16, count: u32, value: u32| {
+                bytes.extend_from_slice(&tag.to_le_bytes());
+                bytes.extend_from_slice(&kind.to_le_bytes());
+                bytes.extend_from_slice(&count.to_le_bytes());
+                bytes.extend_from_slice(&value.to_le_bytes());
+            };
+            entry(256, 4, 1, 2);
+            entry(257, 4, 1, 1);
+            entry(258, 3, 3, 146);
+            entry(259, 3, 1, 1);
+            entry(262, 3, 1, 2);
+            entry(273, 4, 1, 152);
+            entry(274, 3, 1, 6);
+            entry(277, 3, 1, 3);
+            entry(278, 4, 1, 1);
+            entry(279, 4, 1, 6);
+            entry(284, 3, 1, 1);
+        }
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&[8, 0, 8, 0, 8, 0]);
+        bytes.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
+
+        let decoded = decode_bytes(&bytes).unwrap();
+        assert_eq!((decoded.width, decoded.height), (1, 2));
+        assert_eq!(decoded.pixels.len(), 2);
+    }
+
+    #[test]
     fn thumbnail_worker_drops_queued_requests_from_obsolete_directories() {
         let (sender, receiver) = mpsc::channel();
         sender
             .send(ThumbnailRequest {
                 generation: 1,
                 path: PathBuf::from("old-b.jpg"),
+                cancellation: CancellationToken::new(),
             })
             .unwrap();
         sender
             .send(ThumbnailRequest {
                 generation: 2,
                 path: PathBuf::from("new-a.jpg"),
+                cancellation: CancellationToken::new(),
             })
             .unwrap();
         sender
             .send(ThumbnailRequest {
                 generation: 2,
                 path: PathBuf::from("new-b.jpg"),
+                cancellation: CancellationToken::new(),
             })
             .unwrap();
 
@@ -753,6 +933,7 @@ mod tests {
             ThumbnailRequest {
                 generation: 1,
                 path: PathBuf::from("old-a.jpg"),
+                cancellation: CancellationToken::new(),
             },
             &receiver,
         );

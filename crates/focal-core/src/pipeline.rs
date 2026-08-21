@@ -154,6 +154,7 @@ impl Pipeline {
         }
 
         let mut stages = Vec::with_capacity(total_stages);
+        let mut clipping = None;
         for (module_index, module) in self.snapshot.modules.iter().enumerate() {
             if !module.enabled {
                 continue;
@@ -186,6 +187,11 @@ impl Pipeline {
                     reason,
                 }
             })?;
+            if context.quality() == RenderQuality::Preview
+                && matches!(module.parameters, ModuleParameters::OutputTransform)
+            {
+                clipping = Some(ClippingWarnings::from_image(&image));
+            }
             module
                 .apply(&mut image, self.snapshot.working_space, &cancellation)
                 .map_err(|()| cancellation_error(Some(module.kind()), Some(module_index)))?;
@@ -223,7 +229,7 @@ impl Pipeline {
                 return Err(cancellation_error(None, None));
             }
         }
-        Ok((image, RenderReport { stages }))
+        Ok((image, RenderReport { stages, clipping }))
     }
 
     fn validate_modules(&self) -> Result<(), PipelineError> {
@@ -283,6 +289,49 @@ fn cancellation_error(module: Option<ModuleKind>, module_index: Option<usize>) -
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderReport {
     pub stages: Vec<RenderStageReport>,
+    pub clipping: Option<ClippingWarnings>,
+}
+
+/// Per-pixel output-boundary clipping information captured before the output
+/// transform clamps values into display sRGB.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClippingWarnings {
+    width: u32,
+    height: u32,
+    highlights: Vec<bool>,
+    lowlights: Vec<bool>,
+}
+
+impl ClippingWarnings {
+    fn from_image(image: &Image) -> Self {
+        let (highlights, lowlights) = crate::module::output_clipping_masks(image);
+        Self {
+            width: image.width(),
+            height: image.height(),
+            highlights,
+            lowlights,
+        }
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn highlights(&self) -> &[bool] {
+        &self.highlights
+    }
+
+    #[must_use]
+    pub fn lowlights(&self) -> &[bool] {
+        &self.lowlights
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -433,6 +482,40 @@ mod tests {
                 .count(),
             5
         );
+    }
+
+    #[test]
+    fn output_report_preserves_boundary_clipping_before_display_clamping() {
+        let source = Image::new(
+            5,
+            1,
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.5, 0.5, 0.5],
+            ],
+            ImageContract::SRGB_DISPLAY,
+        )
+        .unwrap();
+        let context = RenderContext::new(RenderQuality::Preview);
+        let (_, report) = Pipeline::default()
+            .render_with_context(source, &context, &mut |_| {})
+            .unwrap();
+        let clipping = report
+            .clipping
+            .expect("the default pipeline has an output transform");
+
+        assert_eq!(clipping.width(), 5);
+        assert_eq!(clipping.height(), 1);
+        assert_eq!(clipping.highlights(), &[false, true, true, true, false]);
+        assert_eq!(clipping.lowlights(), &[true, false, false, false, false]);
+
+        let (_, export_report) = Pipeline::default()
+            .render(Image::new(1, 1, vec![[1.0, 1.0, 1.0]], ImageContract::SRGB_DISPLAY).unwrap())
+            .unwrap();
+        assert!(export_report.clipping.is_none());
     }
 
     #[test]
