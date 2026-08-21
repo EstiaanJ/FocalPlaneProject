@@ -23,10 +23,10 @@ The build script creates a deterministic 320 × 192, 16-bit RGB PNG with an embe
 - Smooth points use a safeguarded cubic interpolator that clamps each segment to its control-point interval; Linear and piecewise Bezier interpolation are also available for comparison. Bezier handle X positions are constrained so the curve remains a mathematical function.
 - Smooth cubic mode exposes a per-point tension control: while dragging a point, scroll up or down to make the transition around that point looser or tighter. Linear mode does not use tension.
 - Derivative mode edits the same underlying tone curve through an integrated `d(output) / d(input)` representation. Identity is a horizontal line at derivative 1; negative and greater-than-one slopes are allowed. The derivative graph uses the same point, handle, insertion, and deletion interactions.
-- The curve graph shows Rec. 709 luma histograms on its axes: input in magenta along the bottom and output in cyan along the left. Output is hidden in derivative mode. Histogram calculation can use all decoded pixels or a bounded preview sample, and its 128-bin calculation is labelled approximate.
+- The curve graph shows Adobe RGB luma histograms on its axes: input in magenta along the bottom and output in cyan along the left. Output is hidden in derivative mode. Histogram calculation can use all decoded pixels or a bounded preview sample, and its 128-bin calculation is labelled approximate.
 - PNG and JPEG inputs are supported at 8-bit and 16-bit source precision where the format provides it.
 - The loader first attempts to identify sRGB or Adobe RGB from embedded ICC metadata, then checks EXIF `ColorSpace` and the PNG `sRGB` chunk. The detected choice is shown in the toolbar and can be overridden with the Input colour space menu. Images without recognised metadata default to sRGB.
-- Export writes the latest After image as `exposure-curve-preview.png`, an 8-bit PNG tagged with the sRGB colour space.
+- Export asks for a destination and writes the latest After image as an 8-bit PNG tagged with the sRGB colour space. Encoding and filesystem failures are shown in the UI.
 
 ## Pipeline contract
 

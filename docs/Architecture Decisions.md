@@ -163,9 +163,9 @@ Whether an edit retains a live preset reference or embeds a frozen preset snapsh
 
 ## Geometry
 
-Crop is deferred. Do not design or implement crop, resize-as-edit, orientation controls, masks, or other local/geometry editing as part of the first vertical slice.
+Crop was deliberately absent from the first vertical slice and was subsequently approved for MVP Phase One. The editable crop rectangle rotates around its own centre independently of the displayed image, and its overlay and handles must show that rotation before application. FocalCore samples the correspondingly rotated rectangle only after the crop is confirmed. A crop which would extend outside the original image is uniformly reduced around its centre, preserving its aspect ratio, rather than silently changing its proportions or inventing corner pixels.
 
-The first vertical slice is complete, and crop is now assigned to MVP Phase One. The editable crop rectangle rotates around its own centre independently of the displayed image, and its overlay and handles must show that rotation before application. FocalCore samples the correspondingly rotated rectangle only after the crop is confirmed. A crop which would extend outside the original image is uniformly reduced around its centre, preserving its aspect ratio, rather than silently changing its proportions or inventing corner pixels.
+Resize-as-edit, orientation controls, masks, and other local or geometry editing remain outside the approved scope.
 
 File orientation is not an edit control: it is interpreted once by `focal-io` at decode time so every application sees the same displayed image.
 
@@ -185,7 +185,7 @@ The existing image-to-scope hover and spatial rectangle experiment may remain in
 
 - Focal Editor remains usable without FocalLib.
 - The MVP uses an opinionated ordered pipeline, not a DAG.
-- No crop or local adjustments for the first vertical slice.
+- Crop is the approved Phase One geometry tool; local adjustments remain excluded.
 - The old editor is a GUI reference only.
 - Focal Editor implementation follows the initial human GUI description in [[Focal-Editor Old GUI]]; subsequent consequential GUI changes still require human input.
 - Agents must bring consequential colour, interaction, and architectural decisions back to the human owner.

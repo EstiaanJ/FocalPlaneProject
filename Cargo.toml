@@ -20,7 +20,7 @@ eframe = { version = "0.35.0", default-features = false, features = [
 ] }
 focal-core = { path = "crates/focal-core" }
 focal-plot = { package = "better-plots", path = "crates/better-plots" }
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff"] }
 moxcms = "0.8.1"
 png = "0.18.1"
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }

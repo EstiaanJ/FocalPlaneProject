@@ -9,6 +9,8 @@ aliases:
 
 This is the implementation guide for consolidating the current experiments into the architecture defined by [[Architecture Decisions]]. The initial Focal Editor GUI description is now documented in [[Focal-Editor Old GUI]]. Keep later GUI decisions in a dedicated description rather than silently expanding this migration guide.
 
+The sequence below records the migration logic, not current completion status. The repository foundation, known-defect corrections, FocalCore execution and colour contracts, production scope extraction, and first editor slice are substantially implemented. The shared `focal-io` crate and canonical harness renames remain outstanding.
+
 ## Intended dependency direction
 
 ```text
@@ -38,7 +40,7 @@ The current directories retain historical names until the migration is intention
 | --- | --- | --- |
 | `crates/exposure-cruve-tool` | `focal-curve` | FocalCurve |
 | `crates/better-plots` | `focal-plot` | FocalPlot |
-| empty `crates/focal-editor` | location to be settled with the GUI implementation | Focal Editor |
+| `crates/focal-editor` | `apps/focal-editor` may be considered later | Focal Editor |
 
 Perform renames as their own mechanical step, update Cargo package names and every documentation link together, and run the complete workspace checks afterward. Do not mix renaming with processing changes.
 
@@ -107,7 +109,7 @@ Resolve the confirmed bugs in [[Bug Report]] before treating experimental code a
 - apply orientation through the shared I/O boundary;
 - replace internal alpha ambiguity with the confirmed flatten-or-cancel boundary.
 
-Remove each regression test's `#[ignore]` only when the implementation makes it pass.
+These defects are now corrected and their tests remain active regressions. New extraction work must preserve them.
 
 ### Phase 3 — build `focal-io`
 
@@ -125,7 +127,7 @@ Remove each regression test's `#[ignore]` only when the implementation makes it 
 - Test cancellation and stale-result rejection deterministically.
 - Add multi-pixel controlled fixtures and full-slice tests using `test-image` where appropriate.
 - Add serialisation round-trip, module-order comparison, boundary-error, and Preview-versus-Export contract tests.
-- Keep crop absent.
+- Keep this execution-hardening phase independent of geometry work; crop was approved and added later in MVP Phase One.
 
 ### Phase 5 — consolidate the MVP colour and curve pipeline
 
@@ -144,7 +146,7 @@ Remove each regression test's `#[ignore]` only when the implementation makes it 
 - Rename `sampled_pixels` to reflect whether it counts sampled blocks or report a separately calculated source-pixel coverage.
 - Preserve the standalone FocalPlot harness for human visual evaluation.
 
-### Phase 7 — build the first Focal Editor vertical slice
+### Phase 7 — build the first Focal Editor vertical slice (complete)
 
 The initial GUI description is documented. Implement only its currently approved slice:
 

@@ -1008,7 +1008,7 @@ impl CurveApp {
             .resizable(false)
             .show(context, |ui| {
                 ui.label("This image contains transparency.");
-                ui.label("Continue by flattening it over white?");
+                ui.label("Continue by flattening it over black?");
                 ui.horizontal(|ui| {
                     if ui.button("Flatten and open").clicked() {
                         self.pending_transparency_path = None;
@@ -1518,11 +1518,11 @@ fn input_colour_space_controls_enabled(loading_image: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        derivative_range, histogram_bin_ranges, histogram_is_current,
-        input_colour_space_controls_enabled,
+    use super::*;
+    use crate::curve::{
+        BezierHandleKind, ControlPoint, Curve, CurveChannel, CurveInterpolation, DerivativeCurve,
     };
-    use crate::curve::{ControlPoint, CurveInterpolation, DerivativeCurve};
+    use eframe::egui::{Pos2, Rect, Vec2};
 
     #[test]
     fn histogram_drawing_includes_the_brightest_bin() {
@@ -1530,6 +1530,61 @@ mod tests {
         assert_eq!(ranges.len(), 128);
         assert_eq!(ranges.first().copied(), Some((0.0, 1.0 / 128.0)));
         assert_eq!(ranges.last().copied(), Some((127.0 / 128.0, 1.0)));
+        assert!(histogram_bin_ranges(0).is_empty());
+    }
+
+    #[test]
+    fn graph_helpers_cover_modes_ranges_and_hit_test_boundaries() {
+        let plot = Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0));
+        assert_eq!(GraphMode::ToneCurve.label(), "Tone curve");
+        assert_eq!(GraphMode::Derivative.label(), "Derivative");
+        assert_eq!(graph_screen(plot, [0.0, 0.0]), Pos2::new(0.0, 100.0));
+        assert_eq!(graph_screen(plot, [1.0, 1.0]), Pos2::new(100.0, 0.0));
+        assert_eq!(
+            graph_screen_scaled(plot, [-1.0, 4.0], (-1.0, 2.0)),
+            Pos2::new(0.0, 0.0)
+        );
+        let [x, y] =
+            graph_value_for_mode(plot, Pos2::new(-10.0, 110.0), GraphMode::ToneCurve, None);
+        assert!(x.abs() < f32::EPSILON);
+        assert!(y.abs() < f32::EPSILON);
+        let [x, y] = graph_value_for_mode(
+            plot,
+            Pos2::new(50.0, 50.0),
+            GraphMode::Derivative,
+            Some((-1.0, 2.0)),
+        );
+        assert!((x - 0.5).abs() < f32::EPSILON);
+        assert!((y - 0.5).abs() < f32::EPSILON);
+
+        let curve = Curve::identity();
+        assert_eq!(
+            nearest_point(&curve, plot, Pos2::new(50.0, 50.0)),
+            Some((2, 0.0))
+        );
+        assert!(nearest_point(&curve, plot, Pos2::new(150.0, 150.0)).is_none());
+        let handle = curve.handle(2, BezierHandleKind::Outgoing).unwrap();
+        assert!(
+            nearest_curve_handle(&curve, plot, graph_screen(plot, [handle.x, handle.y])).is_some()
+        );
+        assert!(
+            nearest_curve_target(
+                &curve,
+                plot,
+                graph_screen(plot, [0.5, 0.5]),
+                CurveInterpolation::Linear
+            )
+            .is_some()
+        );
+        assert!(
+            nearest_curve_target(
+                &curve,
+                plot,
+                graph_screen(plot, [handle.x, handle.y]),
+                CurveInterpolation::Bezier
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1555,6 +1610,41 @@ mod tests {
         assert_eq!(
             derivative_range(&curve, CurveInterpolation::Linear),
             (-1.0, 2.0)
+        );
+        assert!(
+            nearest_derivative_point(
+                &curve,
+                Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)),
+                Pos2::new(0.0, 50.0),
+                (-1.0, 2.0)
+            )
+            .is_some()
+        );
+        assert!(
+            nearest_derivative_target(
+                &curve,
+                Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)),
+                Pos2::new(0.0, 50.0),
+                CurveInterpolation::Linear,
+                (-1.0, 2.0)
+            )
+            .is_some()
+        );
+        assert_eq!(
+            curve_colour(CurveMode::LinkedRgb, CurveChannel::Red),
+            CURVE_WHITE
+        );
+        assert_ne!(
+            curve_colour(CurveMode::PerChannelRgb, CurveChannel::Red),
+            CURVE_WHITE
+        );
+        assert_ne!(
+            curve_colour(CurveMode::PerChannelRgb, CurveChannel::Green),
+            CURVE_WHITE
+        );
+        assert_ne!(
+            curve_colour(CurveMode::PerChannelRgb, CurveChannel::Blue),
+            CURVE_WHITE
         );
     }
 }

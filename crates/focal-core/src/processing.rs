@@ -454,6 +454,11 @@ mod tests {
         white_balance(&mut value, 50.0, 0.0, &CancellationToken::new()).unwrap();
         let pixel = value.pixels()[0];
         assert!(pixel[0] > pixel[1] && pixel[1] > pixel[2]);
+
+        let mut tint = image(1, 1, vec![[0.5; 3]]);
+        white_balance(&mut tint, 0.0, 100.0, &CancellationToken::new()).unwrap();
+        let pixel = tint.pixels()[0];
+        assert!(pixel[0] > pixel[1] && pixel[2] > pixel[1]);
     }
 
     #[test]
@@ -485,6 +490,11 @@ mod tests {
                 .flatten()
                 .all(|channel| *channel >= 0.0)
         );
+
+        let mut negative = image(3, 1, vec![[0.05; 3], [0.4; 3], [0.95; 3]]);
+        contrast(&mut negative, -20.0, &CancellationToken::new()).unwrap();
+        assert!(negative.pixels()[0][0] > 0.05);
+        assert!(negative.pixels()[2][0] < 0.95);
     }
 
     #[test]
@@ -506,6 +516,10 @@ mod tests {
         let after = value.pixels()[1][1] - value.pixels()[1][0];
         assert!(after < before);
         assert!(value.pixels()[2][0] > 0.7);
+
+        let mut luminance = image(3, 1, vec![[0.2; 3], [0.8; 3], [0.2; 3]]);
+        noise_reduction(&mut luminance, 100.0, 0.0, &CancellationToken::new()).unwrap();
+        assert!(luminance.pixels()[1][0] < 0.8);
     }
 
     #[test]
@@ -528,6 +542,11 @@ mod tests {
         let pixel = identity.pixels()[0];
         assert!((pixel[0] - pixel[1]).abs() < 1.0e-6);
         assert!((pixel[1] - pixel[2]).abs() < 1.0e-6);
+
+        let mut positive = image(1, 1, vec![[0.8, 0.3, 0.2]]);
+        saturation(&mut positive, 100.0, &CancellationToken::new()).unwrap();
+        let pixel = positive.pixels()[0];
+        assert!(pixel[0] - pixel[2] > 0.5);
     }
 
     #[test]

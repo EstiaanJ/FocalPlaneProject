@@ -20,12 +20,12 @@ A simple photographic control ranging from `-100` to `+100`.
 
 ### White balance
 
-Initially represented by two controls:
+Represented by two controls:
 
-- Warmth or temperature
+- Warmth
 - Tint
 
-The correct behaviour for already rendered PNG/JPEG files versus future RAW files remains an [[Open Questions|open question]].
+For decoded PNG/JPEG inputs these derive opponent-channel gains in linear Adobe RGB while preserving neutral lightness. Future RAW temperature and tint use separate camera-aware semantics.
 
 ## Proposed later controls
 

@@ -10,14 +10,14 @@ The MVP is defined primarily by what is deliberately excluded or delayed. Once t
 
 ## First prototype
 
-The first vertical slice is a prototype, not the complete MVP:
+The first vertical slice is complete but remains a prototype rather than the complete MVP:
 
-1. Open an already decoded PNG or JPEG. - Done
-2. Adjust exposure, contrast, and white balance. - Done
-3. Keep the UI responsive while updating the preview. - Done
-4. Compare the result with the original. - Done
-5. Save editable state in a JSON sidecar. - Needs work
-6. Export a rendered 8-bit sRGB PNG or JPEG. - Almost done
+1. Open a decoded PNG or JPEG.
+2. Adjust exposure, contrast, and white balance.
+3. Keep the UI responsive while updating the preview.
+4. Compare the result with the original.
+5. Save editable state in a JSON sidecar.
+6. Export a rendered 8-bit sRGB PNG.
 
 Starting with PNG and JPEG makes controlled tests practical. X-T5 RAW files are very large and slow to iterate on, and it is difficult to make a controlled X-T5 source image. RAW support follows after the editor and processing architecture are established.
 
@@ -121,17 +121,17 @@ Hotkeys `2`
 
 **Phase two**
 
-- [ ] Clipping warnings, with separate highlight and lowlight toggles
-- [ ] Loupe at the mouse cursor, toggled with `L`
-- [ ] Move and reduce the height of the processing bar as described above
+- [x] Clipping warnings, with separate highlight and lowlight toggles
+- [x] Loupe at the mouse cursor, toggled with `L`
+- [x] Move and reduce the height of the processing bar as described above
 - [ ] Input: Apple RAW from iPhone 12 Pro Max
 - [ ] Input: HEIC
-- [ ] Input: TIFF
+- [x] Input: TIFF
 - [ ] RAW support: Apple DNG
 - [ ] RAW support: Fujifilm X-T5
-- [ ] Copy and paste edits
-- [ ] White-balance picker
-- [ ] Hotkeys
+- [x] Copy and paste edits within the current editor session
+- [x] White-balance picker
+- [ ] Hotkeys beyond the loupe and existing crop shortcuts
 
 **Phase three**
 

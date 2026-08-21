@@ -7,72 +7,42 @@ aliases:
 
 # Vectorscope Research
 
-## Goal
+## Goal and reference
 
-Create a vectorscope inspired by darktable's beautiful, softly coloured RYB display, but use a much deeper black background in FocalPlane.
+FocalPlane's vectorscope is inspired by darktable's softly coloured, powder-like RYB display, but uses a much deeper black background. This is an independent Rust implementation, not a structural translation of darktable.
 
-The supplied screenshot appears to show darktable's **RYB vectorscope**. This is an inference from the perfectly circular hue ring and the painterly red-yellow-blue ordering. Darktable's CIELUV and JzAzBz modes instead derive their boundaries from colour-space chromaticities and generally do not form this regular circle.
+The principal reference is [`vectorscope.c`](/home/estiaan/code/Reference_Projects/darktable-master/src/libs/scopes/vectorscope.c); the [darktable scopes manual](https://docs.darktable.org/usermanual/development/en/module-reference/utility-modules/shared/scopes/) describes its user-facing behaviour. Preserve visible credit to darktable and to Gossett and Chen's *Paint Inspired Color Mixing and Compositing for Visualization*.
 
-This note describes behaviour and algorithms for an independent implementation. The principal local reference is [`src/libs/scopes/vectorscope.c`](/home/estiaan/code/Reference_Projects/darktable-master/src/libs/scopes/vectorscope.c), The [darktable scopes manual](https://docs.darktable.org/usermanual/development/en/module-reference/utility-modules/shared/scopes/) provides the user-facing description.
+A vectorscope discards spatial position and lightness. Hue becomes angle, chroma becomes distance from the centre, and accumulated density becomes brightness. Neutral pixels collect near the centre; strongly chromatic populations form coloured clouds farther out.
 
-## What the scope represents
+## FocalPlane scope modes
 
-A vectorscope discards spatial position and, in these modes, lightness. Each sampled pixel contributes a point where:
+### CIE 1931 xy
 
-- angle represents hue;
-- distance from the centre represents chroma;
-- accumulated brightness represents how many sampled pixels fall into that region.
+The default tab is a familiar CIE 1931 *xy* chromaticity plot rather than darktable's CIELUV or JzAzBz modes. For decoded sRGB pixels it:
 
-Neutral pixels collect near the centre. Strongly chromatic pixels lie farther out. A dense coloured region in the photograph becomes a brighter cloud of that hue.
+1. decodes the sRGB transfer function;
+2. converts linear sRGB to D65 XYZ;
+3. calculates `x = X / (X + Y + Z)` and `y = Y / (X + Y + Z)`;
+4. maps `x` over `[0, 0.8]` and `y` over `[0, 0.9]`;
+5. retains average source display colour per bin so the trace remains coloured.
 
-Darktable offers three coordinate systems:
+The background shows the CIE 1931 2° spectral-locus outline and line of purples over black and a restrained grid. It is a visual chromaticity guide, not a universal input-gamut boundary. CIE 1931 remains linear because it is not a radial chroma scope.
 
-- **CIELUV `u*v*`**: established and comparatively inexpensive;
-- **JzAzBz `AzBz`**: more computationally expensive and intended to be more perceptually uniform;
-- **RYB**: a circular, artist-oriented hue arrangement suitable for colour-harmony overlays.
+### RYB
 
-It also offers linear and logarithmic radial chroma scales. The logarithmic view expands low-chroma detail near the centre.
+Darktable's artist-oriented RYB mode retains hues from the Gossett model but uses spline tables to remap RGB hue to the RYB arrangement and back. FocalPlane follows the same essential behaviour:
 
-## FocalPlane's CIE 1931 tab
+```text
+encoded sRGB-like sample
+→ linear RGB
+→ spline-remapped RYB hue
+→ hue/chroma/value
+→ discard value
+→ polar hue and chroma coordinates
+```
 
-The first FocalPlane tab is a CIE 1931 *xy* chromaticity plot. This is deliberately a simpler, more familiar horseshoe than darktable's current CIELUV and JzAzBz modes; darktable remains the layout and interaction reference, not a claim that the spaces are interchangeable.
-
-For decoded sRGB pixels, the prototype:
-
-1. converts sRGB channels to linear light;
-2. applies the standard sRGB/D65 RGB-to-XYZ matrix;
-3. computes `x = X / (X + Y + Z)` and `y = Y / (X + Y + Z)`;
-4. plots `x` over `[0, 0.8]` and `y` over `[0, 0.9]`, with the vertical axis increasing upward;
-5. stores the average source display colour per bin so the image trace remains fully coloured rather than becoming a monochrome occupancy mask.
-
-The background uses the CIE 1931 2° spectral locus sampled at 5 nm as a coloured outline over a black field and grid. The earlier prototype used softly tinted wedges from the D65 white point to the locus; those fills are intentionally removed so the image trace is not competing with a coloured background. The line between the 380 nm and 780 nm endpoints is the line of purples. This is a visual guide and not a gamut boundary for every possible input profile.
-
-Darktable's linear/logarithmic vectorscope control changes radial placement, not merely alpha. FocalPlane follows that behaviour for RYB: the logarithmic option remaps radius with `log(1 + 29r) / log(30)` while preserving hue angle. CIE 1931 stays linear because it is a chromaticity diagram rather than a radial chroma scope. Dot sharpness is separate and changes the density-to-alpha response, so it can be tuned without changing plotted coordinates.
-
-Hover traces are rendered as a separate inverse-colour layer. The image marker uses the inverse of the sampled decoded pixel; CIE trace bins use their stored average source colour, while RYB trace bins use the visible hue colour at that plotted angle. This keeps highlights readable against both dark and saturated trace colours.
-
-## Why darktable's trace looks colourful
-
-Darktable does not assign one flat colour to every histogram bin. It builds two separate raster layers:
-
-1. A full-colour background mesh maps every angle to a hue.
-2. A monochrome density image records how many pixels land in every vectorscope bin.
-
-During drawing, the density image acts as an alpha mask over the colour mesh. A second white layer is applied through the same mask using a hard-light blend at approximately `0.55` alpha. This combination preserves the hue while making dense areas bloom toward bright pastel colours. Sparse areas remain dim and translucent.
-
-The outer hue ring uses the same colour mesh at about `0.4` opacity, so the guide and trace share exactly the same hue orientation.
-
-## Darktable's RYB mapping
-
-Darktable's RYB model is inspired by Gossett's *Paint Inspired Color Mixing and Compositing for Visualization*. Because the original model is not reversible, darktable retains its cube hues but maps RGB hue to RYB hue and back using cubic spline tables.
-
-For every sampled pixel, darktable's RYB mode conceptually does this:
-
-1. Convert the incoming sRGB-like values to linear sRGB.
-2. Convert RGB hue to the interpolated RYB hue arrangement.
-3. Convert RYB RGB values to HCV: hue, chroma, and value.
-4. Discard value for plotting.
-5. Convert polar hue and chroma to Cartesian scope coordinates:
+The plotted coordinates are:
 
 ```text
 angle = 2π × hue
@@ -80,175 +50,84 @@ x = cos(angle) × chroma
 y = sin(angle) × chroma
 ```
 
-Darktable multiplies both coordinates by `0.01`, which is merely an internal plotting scale and need not be reproduced if FocalPlane normalises its coordinates directly.
+The important property is the nonlinear, reversible hue arrangement, not darktable's incidental internal scale. Forward plotting and reverse selection must use a genuine inverse pair between spline knots so a visible hue maps back to itself.
 
-The important visual property is not that constant. It is the nonlinear, reversible hue remapping which gives yellow, red, blue, green, cyan, and magenta their painterly angular positions while leaving chroma as radius.
+The hue ring follows the RGB-cube edges `red → yellow → green → cyan → blue → magenta → red`. Its guide colours and trace must share the same orientation.
 
-## Hue-ring construction
-
-Darktable traces the six bounded RGB-cube edges which do not touch black or white:
+RYB may use darktable's base-30 logarithmic radial transform:
 
 ```text
-red → yellow → green → cyan → blue → magenta → red
+r_log = log(1 + 29r) / log(30)
 ```
 
-It samples 48 intermediate hues between each neighbouring pair, for 288 samples around the ring.
+This changes sample position while preserving angle. It is separate from the density curve, which changes visible intensity.
 
-In RYB mode, these samples receive evenly spaced angles. Their visible colours are converted back from RYB to RGB, then normalised so the largest RGB component is `1`. Adjacent samples become radial patches in a Cairo mesh extending from the neutral centre to the outer edge. Rasterising that mesh once produces a reusable colour texture.
+## Sampling, density, and rendering
 
-For a FocalPlane implementation, a triangle fan or a CPU-generated RGBA texture can provide the same structure in egui. Generate the mesh at a useful fixed resolution and regenerate it only when its colour model, display profile, scale, or size changes.
+The prototype averages deterministic adaptive square blocks, capped at one million sampled blocks, before converting each block into scope coordinates. It increments a linear bin array and rejects samples outside the plotted range rather than clamping them onto the edge. RYB's radial transform is applied during texture generation with bilinear sampling; CIE remains in linear xy coordinates.
 
-## Pixel sampling and binning
+Averaging pixels before coordinate conversion is not equivalent to averaging their resulting scope coordinates. That trade-off should remain explicit and tested. If analysis is parallelised later, per-worker bin arrays followed by reduction are preferable to an atomic update for every sample.
 
-Darktable uses the lower-resolution preview rather than the full developed image. Its manual explicitly warns that scopes can therefore differ from the final render.
+Raw counts need nonlinear display treatment. The current trace uses an exponential density response with area compensation, followed by a separate dot-sharpness exponent. Density should remain visually comparable when the same photograph or widget is resized.
 
-The current implementation averages adaptive square pixel blocks (capped at one million sampled blocks) before converting each block to chromaticity. It then:
+The colourful appearance comes from separating colour and occupancy:
 
-1. converts the sample to the selected chromaticity coordinates;
-2. maps the linear normalised coordinate into a square `diameter × diameter` buffer;
-3. increments the corresponding integer bin;
-4. ignores samples outside the plotted range rather than clamping them onto the edge.
+1. a hue texture supplies colour;
+2. a density mask supplies opacity;
+3. a restrained white brightening pass lets dense regions bloom toward pastel colours.
 
-The analysis keeps those bins in linear scope coordinates. RYB's optional logarithmic radial transform is applied when the texture is rendered, using bilinear sampling so the expanded centre does not become a blocky nearest-neighbour image. CIE 1931 is always rendered in its linear xy coordinates.
+Draw the deep background and subtle grid first, then the hue ring, density-masked trace, brightening pass, neutral marker, and interaction overlays. Keep presentation parameters such as dot sharpness independent from colour-space analysis.
 
-Averaging before chromaticity conversion is not identical to converting four pixels and averaging their scope coordinates. Darktable's source explicitly identifies this as an unresolved trade-off. FocalPlane should choose and test the behaviour rather than inherit it accidentally.
+Suggested starting colours are `#08090A` at the centre and `#030405` at the exterior, with a low-alpha neutral grid. These are visual starting points, not a locked palette. A deeper background changes perceived saturation, so ring opacity and trace gain must be judged together on the target display.
 
-The current prototype deliberately uses one deterministic CPU bin array per analysis request. If analysis becomes parallel later, per-worker arrays followed by a reduction should remain clearer and cheaper than an atomic increment for every sample.
+## Interaction and separation of responsibilities
 
-## Density to visible intensity
+Image hover sampling and a spatial rectangle may analyse a source pixel or region. Reverse selection is deliberately click-driven: clicking a colour in either scope locks a colour-space region and starts one image scan; another click replaces it, and right-click cancels or clears it. Merely moving over the scope must not launch repeated full-image work.
 
-Raw bin counts have a very wide range. Darktable first normalises density for source and scope size:
+Reverse highlights use inverse source colours so selected pixels remain visible over any hue. Spatial rectangles and reverse colour selection are different tools and must not share ambiguous state.
 
-```text
-normalised_density =
-    (1 / 30) × (scope_width × scope_height)
-             / (sample_width × sample_height)
-             × bin_count
-```
+Keep numerical analysis separate from egui:
 
-The value is clamped to `[0, 1]` and passed through an HLG/Rec.2020 output transfer-function lookup table to turn linear density into display-like intensity. The result is stored as an 8-bit alpha mask.
+- FocalCore owns explicit colour-domain contracts, sampling, coordinates, bins, density data, cancellation, and reverse-selection results;
+- FocalPlot owns texture generation, styling, layout, and interaction;
+- loading, profiles, orientation, metadata, and transparency belong at `focal-io`.
 
-This density transfer is a major part of the look. A simple linear alpha produces either invisible sparse colours or immediately saturated dense colours. FocalPlane does not need to use HLG specifically, but it should use a documented, adjustable nonlinear density curve. Good candidates to compare are:
+The standalone harness may analyse decoded sRGB while that limitation is labelled. Production scopes should analyse an explicitly identified pipeline image. Working-space, display-transformed, and exported sRGB values can legitimately produce different distributions.
 
-```text
-linear:      I = clamp(k × count, 0, 1)
-logarithmic: I = log(1 + k × count) / log(1 + k × peak)
-exponential: I = 1 - exp(-k × count)
-```
+## Validation
 
-The current prototype uses the exponential form with an area compensation and a denominator of `12`, then applies the independent dot-sharpness exponent during texture generation. That intentionally gives sparse colours more presence on the near-black background than the earlier denominator of `18`; it remains a visual tuning parameter rather than a colour-science constant.
+Numerical tests should establish that:
 
-Test density normalisation across image resolutions. The same image downsampled to a different size should produce a visually similar trace.
+- neutral RGB maps to the centre;
+- chroma increases radius without changing hue;
+- hue wraps continuously;
+- empty and invalid input boundaries are handled explicitly;
+- out-of-range coordinates do not collect on the rim;
+- RGB↔RYB mapping round-trips between knots;
+- linear and logarithmic modes preserve angle;
+- density remains comparable across image and scope sizes;
+- analysis is deterministic and stale or cancelled work cannot replace a newer result.
 
-## Optional logarithmic chroma scale
+Useful controlled fixtures include a neutral ramp, hue wheel, hue/chroma plane, repeated saturated patches, and the `R, Y, G, C, B, M, R` gamut-ring fixture with black and white rows. Negative and out-of-gamut fixtures become relevant when the selected pipeline domain supports them.
 
-Darktable expands radial distances with base `30`:
+Human review remains required. Check the powder-like trace, readability of sparse and dense populations, neutral visibility, line weight during resizing, reverse-selection behaviour, and whether the near-black presentation improves the scope without making its ring garish.
 
-```text
-r_log = log(1 + 29 × r / r_max) / log(30) × r_max
-```
+## Remaining choices
 
-Then it preserves the angle by scaling both Cartesian coordinates by `r_log / r`. Zero chroma remains at the centre.
+- whether CIELUV, JzAzBz, or another diagnostic view is useful alongside the existing CIE and RYB tabs;
+- which explicitly labelled pipeline image production scopes analyse by default;
+- whether trace intensity remains fixed or user-adjustable;
+- whether a small density blur improves the powder appearance without obscuring the data;
+- whether colour-harmony guides or direct colour editing belong in a later product phase.
 
-This is separate from the density/intensity curve: radial logarithmic scale changes **where** samples appear, while density scaling changes **how brightly** occupied bins are drawn.
+Consequential changes to scope meaning, colour science, or interaction remain human-owned decisions.
 
-## Recommended FocalPlane rendering layers
-
-Draw back to front:
-
-1. Deep black background.
-2. Very subtle concentric grid circles.
-3. Coloured hue ring and six primary/secondary markers.
-4. Colour-mesh trace masked by density.
-5. Soft white brightening pass masked by the same density.
-6. Neutral centre marker.
-7. Optional colour-picker samples and colour-harmony guides later.
-
-The prototype also supports the reverse diagnostic interaction. A pointer position in either scope is converted back through the same radial mapping used for drawing. The worker then converts every decoded image pixel into scope coordinates and creates a transparent overlay for pixels inside the pointer's adjustable radius. The overlay uses each source pixel's inverse sRGB colour, so the selected colour family remains visible regardless of the photograph's local hue. This is intentionally separate from the image rectangle tool: the rectangle is a spatial ROI, while scope hovering is a colour-space ROI.
-
-Keep analysis and presentation separate:
-
-- `VectorscopeAnalysis` owns sampling, colour conversion, binning, and density normalisation.
-- `VectorscopeStyle` owns background, grid, opacity, trace brightening, and marker appearance.
-- The egui widget owns layout and interaction, consuming already prepared textures or bins.
-
-This separation makes the colour mathematics testable without screenshot testing the GUI.
-
-## Deeper black FocalPlane appearance
-
-Darktable draws a radial theme gradient from `graph_bg` at the scope to a slightly darker `graph_exterior`. Its default theme currently defines `graph_bg` as `#262626`; other themes can make it considerably lighter. The supplied screenshot appears to use a lighter grey theme.
-
-For FocalPlane, begin with:
-
-```text
-scope centre:   #08090A
-scope exterior: #030405
-grid:           low-alpha neutral grey
-```
-
-These are experimental values, not a locked palette. Preserve a slight centre-to-edge gradient rather than using a featureless pure black fill; it keeps the circle readable without producing the large grey field visible in the screenshot.
-
-A near-black background will make the coloured trace appear more saturated and brighter by contrast. Re-tune the hue-ring opacity, white hard-light contribution, and density gain against the new background instead of changing only the background colour. Check the result on the target display and through the application's colour-managed output path.
-
-## Colour management
-
-The scope must state which pipeline image and profile it analyses. A vectorscope calculated from working-space values, display-transformed values, and exported sRGB values can legitimately show different distributions.
-
-Darktable's global colour picker samples after the completed pixel pipeline and works in the selected histogram profile. Its CIELUV and JzAzBz paths convert through profile-aware XYZ representations. The RYB path assumes sRGB-like values before linearising them, which is important context rather than a universally reusable rule.
-
-For FocalPlane's first Adobe RGB input → sRGB output experiment, the most understandable default is to analyse the colour-managed **output preview** in sRGB. Later, an input/output toggle could help explain what the curve and gamut conversion changed, but the selected domain must always be labelled.
-
-Generate the hue texture in a defined RGB space and pass it through the same display transform as the rest of the UI where practical. Otherwise the beautiful ring may be numerically colourful but inaccurate on a calibrated or wide-gamut display.
-
-## Validation plan
-
-### Numerical tests
-
-- Neutral RGB values map to the centre.
-- Increasing chroma at constant hue moves outward without changing angle.
-- Hue wraps continuously at `0/1`.
-- Empty input produces an empty trace.
-- Out-of-range coordinates do not accumulate on the rim.
-- Downsampled versions of the same image have comparable normalised density.
-- Linear and logarithmic radial modes preserve angle.
-- Binning is deterministic across supported thread counts.
-
-### Controlled fixtures
-
-- Neutral grey ramp.
-- Full hue wheel with constant chroma.
-- Hue/chroma plane.
-- The seven-column `R, Y, G, C, B, M, R` gamut-ring fixture suggested in darktable's source, with black and white rows.
-- One saturated colour patch repeated at different image sizes.
-- Out-of-gamut and negative-value fixtures once the working pipeline supports them.
-
-### Human visual checks
-
-- Does the trace preserve the colourful, powder-like quality of the reference?
-- Can sparse and dense colour populations both be read?
-- Does the deeper background improve the image without making the ring garish?
-- Is the neutral cluster visible without dominating the plot?
-- Does resizing the widget preserve apparent density and line weight?
-
-Human visual approval is required here alongside numerical tests, in accordance with [[Engineering Principles]].
-
-## Open design choices
-
-- Keep the prototype's CIE 1931 xy tab, or add darktable-compatible CIELUV/JzAzBz tabs later?
-- Use darktable-like RYB interpolation, a simpler independently designed RYB mapping, or a perceptual hue space such as OKLCh for the first implementation?
-- Analyse the input image, current working image, or colour-managed output preview by default?
-- Use a fixed density transfer or expose a trace-intensity control?
-- Blur the density mask slightly to obtain a softer powder trace, or preserve exact bins?
-- Should the vectorscope be a passive diagnostic, or eventually support direct colour interaction and harmony guides?
-
-These choices affect meaning as well as appearance and should not be decided silently by an implementation agent.
-
-## Sources and further research
+## Sources
 
 - [darktable scopes manual](https://docs.darktable.org/usermanual/development/en/module-reference/utility-modules/shared/scopes/)
-- [`vectorscope.c`](/home/estiaan/code/Reference_Projects/darktable-master/src/libs/scopes/vectorscope.c) — local darktable algorithm and Cairo rendering reference
-- [`cie_colorimetric_tables.c`](/home/estiaan/code/Reference_Projects/darktable-master/src/external/cie_colorimetric_tables.c) — CIE 1931 2° standard observer values
-- [`cie1931.h`](/home/estiaan/code/Reference_Projects/vkdt-master/src/tools/shared/cie1931.h) — an additional local reference for sampled CIE data
-- [`color_ryb.h`](/home/estiaan/code/Reference_Projects/darktable-master/src/common/color_ryb.h) — local spline vertices for darktable's reversible RYB hue mapping
-- Gossett, *Paint Inspired Color Mixing and Compositing for Visualization* — algorithmic inspiration cited by darktable
-- Safdar et al., *Perceptually uniform color space for image signals including high dynamic range and wide gamut* — JzAzBz background
+- [`vectorscope.c`](/home/estiaan/code/Reference_Projects/darktable-master/src/libs/scopes/vectorscope.c)
+- [`color_ryb.h`](/home/estiaan/code/Reference_Projects/darktable-master/src/common/color_ryb.h)
+- [`cie_colorimetric_tables.c`](/home/estiaan/code/Reference_Projects/darktable-master/src/external/cie_colorimetric_tables.c)
+- [`cie1931.h`](/home/estiaan/code/Reference_Projects/vkdt-master/src/tools/shared/cie1931.h)
+- Gossett and Chen, *Paint Inspired Color Mixing and Compositing for Visualization*
+- Safdar et al., *Perceptually uniform color space for image signals including high dynamic range and wide gamut*

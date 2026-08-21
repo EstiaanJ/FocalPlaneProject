@@ -16,11 +16,23 @@ The CPU reference defines correct [[Focal Core Pipeline|ordered pipeline]] resul
 
 ## Controlled fixtures
 
-Start the first prototype with decoded PNG and JPEG fixtures. They are small, fast, and controllable compared with X-T5 RAW files. RAW decoding and large-file performance should be introduced after the editor and processing contracts work reliably.
+Use decoded PNG and JPEG fixtures for small, fast, controlled tests. Add RAW and large-file fixtures only where their format or performance characteristics are the behaviour under test.
 
 MVP colour-pipeline fixtures should include 16-bit Adobe RGB PNGs with known pixel values and profiles, plus sRGB inputs which must be converted into the same canonical Adobe RGB curve domain. Include more than single-pixel tests: gradients, colour patches, small multi-pixel images, and whole image slices are needed to expose indexing, channel, stride, boundary, and state-leakage bugs.
 
 Each processing stage needs numerical tests for its own contract and integration tests proving that the composed pipeline preserves the documented order and domains. The single-threaded CPU path is the reference; concurrency tests must prove that parallel scheduling, stale-result rejection, and caching do not change the accepted result.
+
+## Boundary and state-transition testing
+
+Prioritise the boundaries implicated by the historical defects in [[Bug Report]]:
+
+1. **Table-driven invalid-state matrices:** reuse cases for non-finite and out-of-range parameters, zero or mismatched dimensions, malformed metadata, unsupported versions, and invalid curve or crop state.
+2. **Small decode-to-export fixtures:** verify orientation, dimensions, profile, alpha policy, bit depth, selected pixels, output tagging, and edit-state reproduction through the complete path.
+3. **Deterministic concurrency models:** use controllable workers, barriers, or fake stages to force important completion orders, cancellation points, failures, and retries without relying on timing.
+4. **Property-based tests:** target dimension/buffer relationships, crop geometry, curve ordering, colour round trips, finite-value preservation, and cancellation checkpoint bounds.
+5. **Boundary-routing tests:** prove which source, image revision, edit snapshot, crop state, colour contract, and Preview/Export quality actually reach processing and encoding.
+
+Adversarial cases should include empty, one-pixel, one-row, very wide, transparent, 8-bit, 16-bit, rotated, profiled, unprofiled, and malformed inputs, plus obsolete work completing after its replacement.
 
 ## Cancellation and responsiveness
 
@@ -54,4 +66,21 @@ Tests need to control or explicitly tolerate:
 
 Exact tolerances for accelerated previews and renders remain to be defined.
 
-Human evaluation remains required for control behaviour, visual artefacts, perceived responsiveness, and any claimed preview/export equivalence. Record what a person is expected to inspect so “looks right” does not become an undocumented substitute for a test.
+Human evaluation remains required for control behaviour, visual artefacts, perceived responsiveness, and any claimed preview/export equivalence. Each visible feature should record a short repeatable checklist naming the fixtures, gestures, zoom levels, expected behaviour, and artefacts to inspect so “looks right” does not become an undocumented substitute for a test.
+
+## Feature review checklist
+
+Before merging processing, file-boundary, or editor work, verify:
+
+- [ ] Input and output colour domain, encoding, range, alpha convention, dimensions, and version are explicit.
+- [ ] Constructors and deserialisers reject invalid, non-finite, malformed, and invariant-breaking state.
+- [ ] Relevant adversarial shapes, bit depths, profiles, transparency, and orientations are tested.
+- [ ] Every asynchronous result has a complete identity, explicit cancellation owner, bounded checkpoints, and stale-result rejection.
+- [ ] Jobs cannot overwrite unrelated state or caches, and failures are visible and retryable.
+- [ ] Preview receives the intended bounded source region; export receives the intended full-resolution source and current edit snapshot.
+- [ ] Unconfirmed geometry or stale UI state cannot reach processing or export.
+- [ ] A boundary or integration test proves correct routing rather than testing only the helper calculation.
+- [ ] Equivalent logic is not being duplicated across FocalCore, applications, or the planned `focal-io` boundary.
+- [ ] The manual visual and interaction check is recorded and performed where behaviour is visible.
+
+Correct cancellation is not enough by itself: measure the **150 ms** target on the target system with a repeatable benchmark or performance test.

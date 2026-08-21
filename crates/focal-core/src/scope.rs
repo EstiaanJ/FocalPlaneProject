@@ -1092,6 +1092,10 @@ mod tests {
     #[test]
     fn invalid_analysis_boundaries_are_rejected() {
         assert_eq!(
+            try_analyse_region_in_space(&[], 1, 1, 0, None, ScopeSpace::Ryb),
+            Err(ScopeError::ResolutionTooSmall { actual: 0 })
+        );
+        assert_eq!(
             try_analyse_region_in_space(&[], 1, 1, 1, None, ScopeSpace::Ryb),
             Err(ScopeError::ResolutionTooSmall { actual: 1 })
         );
@@ -1100,6 +1104,13 @@ mod tests {
             Err(ScopeError::PixelBufferLength {
                 expected: 4,
                 actual: 0
+            })
+        );
+        assert_eq!(
+            try_analyse_region_in_space(&[0; 5], 1, 1, 33, None, ScopeSpace::Ryb),
+            Err(ScopeError::PixelBufferLength {
+                expected: 4,
+                actual: 5
             })
         );
         assert_eq!(
@@ -1123,6 +1134,48 @@ mod tests {
                 ScopeSpace::Ryb
             ),
             Err(ScopeError::ReversedRectangle)
+        );
+        assert_eq!(
+            try_analyse_region_in_space(
+                &[0; 4],
+                1,
+                1,
+                33,
+                Some(AnalysisRegion::Circle {
+                    centre: [0.5, 0.5],
+                    radius: -0.001,
+                }),
+                ScopeSpace::Ryb
+            ),
+            Err(ScopeError::NegativeCircleRadius)
+        );
+        assert_eq!(
+            try_analyse_region_in_space(
+                &[0; 4],
+                1,
+                1,
+                33,
+                Some(AnalysisRegion::Circle {
+                    centre: [f32::NAN, 0.5],
+                    radius: 0.5,
+                }),
+                ScopeSpace::Ryb
+            ),
+            Err(ScopeError::NonFiniteRegion)
+        );
+        assert_eq!(
+            try_analyse_region_in_space(
+                &[0; 4],
+                1,
+                1,
+                33,
+                Some(AnalysisRegion::Rectangle {
+                    min: [0.0, f32::INFINITY],
+                    max: [1.0, 1.0],
+                }),
+                ScopeSpace::Ryb
+            ),
+            Err(ScopeError::NonFiniteRegion)
         );
     }
 

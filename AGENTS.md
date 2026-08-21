@@ -18,7 +18,7 @@ Read these documents before making architectural or product changes:
 - Shared decoding, ICC, metadata, orientation, transparency-boundary, and encoding work belongs in the planned `focal-io` library.
 - FocalCore must not depend on egui, eframe, file dialogs, or application layout.
 - Use an explicit ordered pipeline. Do not introduce a DAG or node architecture.
-- Do not implement crop or local adjustments for the first vertical slice.
+- Crop was excluded from the first vertical slice and is now approved for MVP Phase One. Do not add local adjustments.
 - The human owner has now provided the initial GUI description in `docs/Focal-Editor Old GUI.md`; follow it for the first slice and do not add controls which it explicitly excludes.
 
 ## Current colour decisions
@@ -44,7 +44,7 @@ Read these documents before making architectural or product changes:
 
 ## Known bugs
 
-Known-bug tests in `docs/Bug Report.md` are deliberately ignored by the normal suite. Fix the implementation before removing an ignore, then retain the test as an active regression test.
+Confirmed defects and their active regression tests are recorded in `docs/Bug Report.md`. Fix the implementation before treating a new known-bug test as part of the ordinary suite, then retain it permanently as an active regression test.
 
 Run routine checks from the workspace root:
 

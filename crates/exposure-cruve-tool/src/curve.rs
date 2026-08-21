@@ -282,13 +282,13 @@ impl Curve {
         if !x.is_finite() {
             return 0.0;
         }
-        let x = x.clamp(0.0, 1.0);
         // Outside the anchor span the tone curve has constant tails. At the
         // anchors themselves use the one-sided segment derivative so an
         // identity curve correctly reports slope 1 at both ends.
         if x < self.points[0].x || x > self.points[self.points.len() - 1].x {
             return 0.0;
         }
+        let x = x.clamp(0.0, 1.0);
         let segment = self.segment_for_x(x);
         let left = self.points[segment];
         let right = self.points[segment + 1];
@@ -1364,12 +1364,88 @@ mod tests {
     fn identity_curve_is_identity_at_and_between_points() {
         let curve = Curve::identity();
         for interpolation in CurveInterpolation::ALL {
-            for x in [0.0, 0.03, 0.25, 0.41, 0.75, 1.0] {
+            for x in [
+                f32::NEG_INFINITY,
+                -0.01,
+                0.0,
+                0.03,
+                0.25,
+                0.41,
+                0.75,
+                1.0,
+                1.01,
+                f32::INFINITY,
+                f32::NAN,
+            ] {
+                let expected = if x.is_finite() {
+                    x.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 assert!(
-                    (curve.evaluate_with_interpolation(x, interpolation) - x).abs() < 1e-4,
+                    (curve.evaluate_with_interpolation(x, interpolation) - expected).abs() < 1e-4,
                     "{interpolation:?} x={x}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn curve_construction_rejects_each_invalid_partition() {
+        assert!(Curve::from_points(Vec::new()).is_none());
+        for point in [
+            ControlPoint { x: -0.001, y: 0.5 },
+            ControlPoint { x: 0.5, y: -0.001 },
+            ControlPoint { x: 1.001, y: 0.5 },
+            ControlPoint { x: 0.5, y: 1.001 },
+            ControlPoint {
+                x: f32::NAN,
+                y: 0.5,
+            },
+            ControlPoint {
+                x: 0.5,
+                y: f32::INFINITY,
+            },
+        ] {
+            assert!(Curve::from_points(vec![ControlPoint { x: 0.0, y: 0.0 }, point]).is_none());
+        }
+        assert!(
+            Curve::from_points(vec![
+                ControlPoint { x: 0.0, y: 0.0 },
+                ControlPoint { x: 0.5, y: 0.5 },
+                ControlPoint { x: 0.5, y: 0.75 },
+            ])
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn sampling_and_derivatives_have_defined_count_and_tail_boundaries() {
+        let curve = Curve::identity();
+        assert_eq!(
+            curve
+                .sample_with_interpolation(0, CurveInterpolation::Smooth)
+                .len(),
+            2
+        );
+        assert_eq!(
+            curve
+                .sample_with_interpolation(1, CurveInterpolation::Linear)
+                .len(),
+            2
+        );
+        assert_eq!(
+            curve
+                .sample_with_interpolation(5, CurveInterpolation::Bezier)
+                .len(),
+            5
+        );
+        for interpolation in CurveInterpolation::ALL {
+            assert!(curve.derivative_at(-0.1, interpolation).abs() < f32::EPSILON);
+            assert!(curve.derivative_at(1.1, interpolation).abs() < f32::EPSILON);
+            assert!(curve.derivative_at(f32::NAN, interpolation).abs() < f32::EPSILON);
+            assert!((curve.derivative_at(0.0, interpolation) - 1.0).abs() < 1.0e-4);
+            assert!((curve.derivative_at(1.0, interpolation) - 1.0).abs() < 1.0e-4);
         }
     }
 
@@ -1485,6 +1561,13 @@ mod tests {
         curve.set_tension(1, 2.5);
         assert!((curve.tension(1) - 2.5).abs() < 1e-6);
         assert_eq!(curve.points()[1], ControlPoint { x: 0.4, y: 0.9 });
+        curve.set_tension(1, 0.0);
+        assert!((curve.tension(1) - 0.1).abs() < 1.0e-6);
+        curve.set_tension(1, 5.0);
+        assert!((curve.tension(1) - 4.0).abs() < 1.0e-6);
+        curve.set_tension(1, f32::NAN);
+        assert!((curve.tension(1) - 4.0).abs() < 1.0e-6);
+        assert!((curve.tension(99) - 1.0).abs() < 1.0e-6);
     }
 
     #[test]
@@ -1593,6 +1676,20 @@ mod tests {
     #[test]
     fn curve_domain_contract_names_adobe_rgb() {
         assert_eq!(CURVE_DOMAIN_LABEL, "canonical encoded Adobe RGB (1998)");
+        for mode in CurveMode::ALL {
+            assert!(!mode.label().is_empty());
+            assert!(!mode.description().is_empty());
+        }
+        for channel in CurveChannel::ALL {
+            assert!(!channel.label().is_empty());
+        }
+        for luminance in LuminanceDefinition::ALL {
+            assert!(!luminance.label().is_empty());
+        }
+        for interpolation in CurveInterpolation::ALL {
+            assert!(!interpolation.label().is_empty());
+            assert!(!interpolation.description().is_empty());
+        }
     }
 
     #[test]
@@ -1603,6 +1700,16 @@ mod tests {
         assert!((red - 0.297_355).abs() < 1e-6);
         assert!((green - 0.627_372).abs() < 1e-6);
         assert!((blue - 0.075_273).abs() < 1e-6);
+        for definition in LuminanceDefinition::ALL {
+            assert!(super::luma_with_definition([0.0, 0.0, 0.0], definition).abs() < f32::EPSILON);
+            assert!(
+                (super::luma_with_definition([1.0, 1.0, 1.0], definition) - 1.0).abs()
+                    < f32::EPSILON
+            );
+            assert!(
+                (0.0..=1.0).contains(&super::luma_with_definition([-1.0, 2.0, 0.0], definition))
+            );
+        }
     }
 
     #[test]

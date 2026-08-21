@@ -12,8 +12,8 @@ use focal_core::{
     RenderQuality,
 };
 use image::{
-    ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader,
-    codecs::{jpeg::JpegDecoder, png::PngDecoder},
+    ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat,
+    codecs::{jpeg::JpegDecoder, png::PngDecoder, tiff::TiffDecoder},
 };
 use moxcms::{ColorProfile, Layout, TransformOptions};
 
@@ -42,24 +42,24 @@ impl DecodedImage {
     }
 
     /// Flattens transparency onto black in linear light.
-    #[must_use]
-    pub fn flatten_onto_black(mut self) -> Self {
+    #[must_use = "the image or flattening error must be handled"]
+    pub fn flatten_onto_black(mut self) -> Result<Self, ImageIoError> {
         for ((pixel, alpha), rgba) in self
             .pixels
             .iter_mut()
             .zip(self.alpha.iter().copied())
             .zip(self.rgba.chunks_exact_mut(4))
         {
-            for (channel, byte) in pixel.iter_mut().zip(&mut rgba[..3]) {
+            for channel in pixel.iter_mut() {
                 let linear = decode_channel(*channel, self.input_contract.encoding) * alpha;
                 *channel = encode_channel(linear, self.input_contract.encoding);
-                *byte = to_byte(*channel);
             }
             rgba[3] = u8::MAX;
         }
         self.alpha.fill(1.0);
         self.has_transparency = false;
-        self
+        self.rgba = display_rgba_from_working_pixels(&self.pixels, self.input_contract)?;
+        Ok(self)
     }
 }
 
@@ -89,6 +89,13 @@ fn decode_bytes(bytes: &[u8]) -> Result<DecodedImage, ImageIoError> {
         }
         ImageFormat::Png => {
             let mut decoder = PngDecoder::new(Cursor::new(bytes)).map_err(ImageIoError::Decode)?;
+            (
+                decoder.icc_profile().map_err(ImageIoError::Decode)?,
+                decoder.orientation().map_err(ImageIoError::Decode)?,
+            )
+        }
+        ImageFormat::Tiff => {
+            let mut decoder = TiffDecoder::new(Cursor::new(bytes)).map_err(ImageIoError::Decode)?;
             (
                 decoder.icc_profile().map_err(ImageIoError::Decode)?,
                 decoder.orientation().map_err(ImageIoError::Decode)?,
@@ -292,7 +299,7 @@ pub fn spawn_loader() -> (Sender<LoadRequest>, Receiver<LoadResult>) {
                             (path, image)
                         }
                         LoadOperation::FlattenOntoBlack { path, image } => {
-                            (path, Ok(image.flatten_onto_black()))
+                            (path, image.flatten_onto_black())
                         }
                     };
                     let result = LoadResult {
@@ -348,19 +355,50 @@ fn newest_thumbnail_batch(
 }
 
 pub fn decode_thumbnail(path: &Path, maximum_dimension: u32) -> Result<Thumbnail, ImageIoError> {
-    let image = ImageReader::open(path)
-        .map_err(|source| ImageIoError::Open {
-            path: path.to_path_buf(),
-            source,
-        })?
-        .decode()
-        .map_err(ImageIoError::Decode)?
+    let bytes = std::fs::read(path).map_err(|source| ImageIoError::Open {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let format = image::guess_format(&bytes).map_err(ImageIoError::Decode)?;
+    let (orientation, icc) = match format {
+        ImageFormat::Jpeg => {
+            let mut decoder =
+                JpegDecoder::new(Cursor::new(&bytes)).map_err(ImageIoError::Decode)?;
+            (
+                decoder.orientation().map_err(ImageIoError::Decode)?,
+                decoder.icc_profile().map_err(ImageIoError::Decode)?,
+            )
+        }
+        ImageFormat::Png => {
+            let mut decoder = PngDecoder::new(Cursor::new(&bytes)).map_err(ImageIoError::Decode)?;
+            (
+                decoder.orientation().map_err(ImageIoError::Decode)?,
+                decoder.icc_profile().map_err(ImageIoError::Decode)?,
+            )
+        }
+        ImageFormat::Tiff => {
+            let mut decoder =
+                TiffDecoder::new(Cursor::new(&bytes)).map_err(ImageIoError::Decode)?;
+            (
+                decoder.orientation().map_err(ImageIoError::Decode)?,
+                decoder.icc_profile().map_err(ImageIoError::Decode)?,
+            )
+        }
+        _ => return Err(ImageIoError::UnsupportedFormat),
+    };
+    let mut image =
+        image::load_from_memory_with_format(&bytes, format).map_err(ImageIoError::Decode)?;
+    image.apply_orientation(orientation);
+    let image = image
         .thumbnail(maximum_dimension, maximum_dimension)
         .to_rgba8();
+    let width = image.width();
+    let height = image.height();
+    let rgba = display_rgba_from_source_pixels(&image.into_raw(), icc.as_deref())?;
     Ok(Thumbnail {
-        width: image.width(),
-        height: image.height(),
-        rgba: image.into_raw(),
+        width,
+        height,
+        rgba,
     })
 }
 
@@ -378,6 +416,79 @@ fn linear_to_srgb(value: f32) -> f32 {
     } else {
         1.055 * value.powf(1.0 / 2.4) - 0.055
     }
+}
+
+fn display_rgba_from_working_pixels(
+    pixels: &[[f32; 3]],
+    contract: ImageContract,
+) -> Result<Vec<u8>, ImageIoError> {
+    if contract == ImageContract::ADOBE_RGB_CURVE {
+        let input = pixels
+            .iter()
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
+            .collect::<Vec<_>>();
+        let source = ColorProfile::new_adobe_rgb();
+        let destination = ColorProfile::new_srgb();
+        let executor = source
+            .create_transform_f32(
+                Layout::Rgba,
+                &destination,
+                Layout::Rgba,
+                TransformOptions::default(),
+            )
+            .map_err(|error| ImageIoError::ColourProfile(error.to_string()))?;
+        let mut output = vec![0.0; input.len()];
+        executor
+            .transform(&input, &mut output)
+            .map_err(|error| ImageIoError::ColourProfile(error.to_string()))?;
+        Ok(output
+            .chunks_exact(4)
+            .flat_map(|pixel| pixel.iter().copied().map(to_byte))
+            .collect())
+    } else {
+        Ok(pixels
+            .iter()
+            .flat_map(|pixel| {
+                pixel
+                    .iter()
+                    .copied()
+                    .map(to_byte)
+                    .chain(std::iter::once(u8::MAX))
+            })
+            .collect())
+    }
+}
+
+fn display_rgba_from_source_pixels(
+    rgba: &[u8],
+    icc: Option<&[u8]>,
+) -> Result<Vec<u8>, ImageIoError> {
+    let Some(icc) = icc else {
+        return Ok(rgba.to_vec());
+    };
+    let source = ColorProfile::new_from_slice(icc)
+        .map_err(|error| ImageIoError::ColourProfile(error.to_string()))?;
+    let destination = ColorProfile::new_srgb();
+    let executor = source
+        .create_transform_f32(
+            Layout::Rgba,
+            &destination,
+            Layout::Rgba,
+            TransformOptions::default(),
+        )
+        .map_err(|error| ImageIoError::ColourProfile(error.to_string()))?;
+    let input = rgba
+        .chunks_exact(4)
+        .flat_map(|pixel| pixel.iter().map(|value| f32::from(*value) / 255.0))
+        .collect::<Vec<_>>();
+    let mut output = vec![0.0; input.len()];
+    executor
+        .transform(&input, &mut output)
+        .map_err(|error| ImageIoError::ColourProfile(error.to_string()))?;
+    Ok(output
+        .chunks_exact(4)
+        .flat_map(|pixel| pixel.iter().copied().map(to_byte))
+        .collect())
 }
 
 fn decode_channel(value: f32, encoding: ColourEncoding) -> f32 {
@@ -418,7 +529,9 @@ impl fmt::Display for ImageIoError {
                 write!(formatter, "could not open {}: {source}", path.display())
             }
             Self::Decode(source) => write!(formatter, "could not decode image: {source}"),
-            Self::UnsupportedFormat => write!(formatter, "only PNG and JPEG images are supported"),
+            Self::UnsupportedFormat => {
+                write!(formatter, "only PNG, JPEG, and TIFF images are supported")
+            }
             Self::ColourProfile(source) => {
                 write!(
                     formatter,
@@ -447,7 +560,7 @@ mod tests {
             has_transparency: true,
         };
 
-        let flattened = source.flatten_onto_black();
+        let flattened = source.flatten_onto_black().unwrap();
         assert!(!flattened.has_transparency);
         assert_eq!(flattened.rgba, vec![188, 0, 0, 255]);
         assert!((flattened.pixels[0][0] - 0.736_65).abs() < 0.002);
@@ -506,6 +619,40 @@ mod tests {
     }
 
     #[test]
+    fn flattening_an_adobe_image_keeps_display_rgba_in_srgb() {
+        let image = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(1, 1, vec![128, 64, 32, 128]).unwrap(),
+        );
+        let profile = ColorProfile::new_adobe_rgb().encode().unwrap();
+        let flattened = decoded_image_from_dynamic_with_profile(&image, Some(&profile))
+            .unwrap()
+            .flatten_onto_black()
+            .unwrap();
+
+        let source = ColorProfile::new_adobe_rgb();
+        let destination = ColorProfile::new_srgb();
+        let executor = source
+            .create_transform_f32(
+                Layout::Rgba,
+                &destination,
+                Layout::Rgba,
+                TransformOptions::default(),
+            )
+            .unwrap();
+        let input = [
+            flattened.pixels[0][0],
+            flattened.pixels[0][1],
+            flattened.pixels[0][2],
+            1.0,
+        ];
+        let mut output = [0.0; 4];
+        executor.transform(&input, &mut output).unwrap();
+        let expected = output.map(to_byte);
+
+        assert_eq!(flattened.rgba, expected.to_vec());
+    }
+
+    #[test]
     fn sixteen_bit_alpha_is_not_quantised_before_transparency_detection() {
         let image = image::ImageBuffer::<image::Rgba<u16>, _>::from_raw(
             1,
@@ -517,6 +664,67 @@ mod tests {
 
         assert!(decoded.has_transparency);
         assert!(decoded.alpha[0] < 1.0);
+    }
+
+    #[test]
+    fn transfer_helpers_cover_encoding_boundaries_and_clamping() {
+        for value in [0.0, 0.001, 0.040_45, 0.18, 1.0] {
+            assert!((srgb_to_linear(linear_to_srgb(value)) - value).abs() < 1.0e-5);
+        }
+        for encoding in [
+            ColourEncoding::Srgb,
+            ColourEncoding::AdobeRgb,
+            ColourEncoding::Linear,
+        ] {
+            let decoded = decode_channel(0.5, encoding);
+            let encoded = encode_channel(decoded, encoding);
+            assert!((encoded - 0.5).abs() < 1.0e-5, "encoding={encoding:?}");
+        }
+        assert!(decode_channel(-1.0, ColourEncoding::AdobeRgb).abs() < f32::EPSILON);
+        assert!(encode_channel(-1.0, ColourEncoding::AdobeRgb).abs() < f32::EPSILON);
+        assert_eq!(to_byte(-1.0), 0);
+        assert_eq!(to_byte(0.0), 0);
+        assert_eq!(to_byte(1.0), 255);
+        assert_eq!(to_byte(2.0), 255);
+        assert_eq!(to_byte(0.5), 128);
+    }
+
+    #[test]
+    fn display_conversion_preserves_alpha_and_supports_profiled_and_unprofiled_pixels() {
+        let pixels = [[0.0, 0.5, 1.0]];
+        assert_eq!(
+            display_rgba_from_working_pixels(&pixels, ImageContract::SRGB_DISPLAY).unwrap(),
+            vec![0, 128, 255, 255]
+        );
+        let profiled =
+            display_rgba_from_working_pixels(&pixels, ImageContract::ADOBE_RGB_CURVE).unwrap();
+        assert_eq!(profiled.len(), 4);
+        assert_eq!(profiled[3], 255);
+
+        let rgba = [1, 2, 3, 4];
+        assert_eq!(display_rgba_from_source_pixels(&rgba, None).unwrap(), rgba);
+        assert!(matches!(
+            display_rgba_from_source_pixels(&rgba, Some(&[0, 1, 2])),
+            Err(ImageIoError::ColourProfile(_))
+        ));
+    }
+
+    #[test]
+    fn tiff_decode_enters_the_same_explicit_srgb_boundary_as_png_and_jpeg() {
+        let bytes = {
+            let mut cursor = Cursor::new(Vec::new());
+            let encoder = image::codecs::tiff::TiffEncoder::new(&mut cursor);
+            encoder
+                .write_image(&[255, 0, 0, 0, 255, 0], 2, 1, ExtendedColorType::Rgb8)
+                .unwrap();
+            cursor.into_inner()
+        };
+
+        let decoded = decode_bytes(&bytes).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        assert_eq!(decoded.input_contract, ImageContract::SRGB_DISPLAY);
+        assert_eq!(decoded.pixels.len(), 2);
+        assert_eq!(decoded.rgba.len(), 8);
     }
 
     #[test]
@@ -584,5 +792,50 @@ mod tests {
 
         let decoded = decode_bytes(&png).unwrap();
         assert_eq!((decoded.width, decoded.height), (1, 2));
+    }
+
+    #[test]
+    fn thumbnail_decode_applies_png_orientation() {
+        let pixels = [255_u8, 0, 0, 0, 0, 255];
+        let tiff = [
+            b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0,
+            0,
+        ];
+        let mut png = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder.set_exif_metadata(tiff.to_vec()).unwrap();
+        encoder
+            .write_image(&pixels, 2, 1, ExtendedColorType::Rgb8)
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "focal-editor-thumbnail-orientation-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, png).unwrap();
+
+        let thumbnail = decode_thumbnail(&path, 2).unwrap();
+        assert_eq!((thumbnail.width, thumbnail.height), (1, 2));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn thumbnail_decode_converts_embedded_icc_to_display_srgb() {
+        let profile = ColorProfile::new_adobe_rgb().encode().unwrap();
+        let mut png = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder.set_icc_profile(profile).unwrap();
+        encoder
+            .write_image(&[128, 64, 32, 255], 1, 1, ExtendedColorType::Rgba8)
+            .unwrap();
+        let expected = decode_bytes(&png).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "focal-editor-thumbnail-profile-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, png).unwrap();
+
+        let thumbnail = decode_thumbnail(&path, 1).unwrap();
+        assert_eq!(thumbnail.rgba, expected.rgba);
+        std::fs::remove_file(path).unwrap();
     }
 }

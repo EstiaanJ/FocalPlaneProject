@@ -28,4 +28,4 @@ Tracked images must be no larger than 10 kB (10,000 bytes). Larger local stress 
 | `pure_chroma_16.png` | 16-bit PNG precision stress input | Local only |
 | `large-image-test.jpg` | Large JPEG performance and memory input | Local only |
 
-The non-default EXIF-orientation fixture is generated deterministically in `crates/focal-engine/tests/fixture_policy.rs` by adding orientation 6 metadata to `test.jpg`. Keeping it in test code avoids another binary fixture while providing a reproducible rotated-orientation input.
+Non-default JPEG and PNG orientation fixtures are generated deterministically inside the relevant crate tests. Keeping them in test code avoids additional binary fixtures while providing reproducible rotated-orientation inputs.

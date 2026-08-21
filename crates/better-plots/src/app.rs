@@ -1402,6 +1402,30 @@ mod tests {
     fn fitting_preserves_aspect_ratio() {
         let fitted = fit_size(Vec2::new(400.0, 200.0), Vec2::new(300.0, 300.0));
         assert_eq!(fitted, Vec2::new(300.0, 150.0));
+        assert_eq!(fit_size(Vec2::ZERO, Vec2::new(300.0, 300.0)), Vec2::ZERO);
+        assert_eq!(fit_size(Vec2::new(10.0, 10.0), Vec2::ZERO), Vec2::ZERO);
+    }
+
+    #[test]
+    fn scope_tabs_and_hit_areas_cover_each_space_and_boundary() {
+        assert_eq!(ScopeTab::Cie1931.space(), ScopeSpace::Cie1931);
+        assert_eq!(ScopeTab::Ryb.space(), ScopeSpace::Ryb);
+        assert_eq!(ScopeTab::Cie1931.label(), "CIE 1931");
+        assert_eq!(ScopeTab::Ryb.label(), "RYB");
+
+        let ryb = ScopeHitArea::Ryb {
+            centre: Pos2::new(50.0, 50.0),
+            radius: 10.0,
+        };
+        assert_eq!(ryb.space(), ScopeSpace::Ryb);
+        assert_eq!(ryb.coordinate(Pos2::new(50.0, 50.0)), Some([0.5, 0.5]));
+        assert!(ryb.coordinate(Pos2::new(61.0, 50.0)).is_none());
+
+        let chart = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 80.0));
+        let cie = ScopeHitArea::Cie { chart };
+        assert_eq!(cie.space(), ScopeSpace::Cie1931);
+        assert_eq!(cie.coordinate(Pos2::new(0.0, 0.0)), Some([0.0, 0.0]));
+        assert_eq!(cie.coordinate(Pos2::new(101.0, 40.0)), None);
     }
 
     #[test]
@@ -1409,6 +1433,12 @@ mod tests {
         let rectangle = ImageRect::new([-20.0, 10.0], [120.0, 140.0]).clamp(100.0, 100.0);
         assert_point_eq(rectangle.min, [0.0, 10.0]);
         assert_point_eq(rectangle.max, [100.0, 100.0]);
+        let ordered = ImageRect::new([8.0, 9.0], [2.0, 1.0]);
+        assert_point_eq(ordered.min, [2.0, 1.0]);
+        assert_point_eq(ordered.max, [8.0, 9.0]);
+        assert!(ordered.contains([2.0, 1.0]));
+        assert!(ordered.contains([8.0, 9.0]));
+        assert!(!ordered.contains([8.1, 9.0]));
     }
 
     #[test]
@@ -1417,6 +1447,18 @@ mod tests {
         let resized = resize_rect(original, RectHandle::BottomRight, [90.0, 95.0]);
         assert_point_eq(resized.min, original.min);
         assert_point_eq(resized.max, [90.0, 95.0]);
+        assert_eq!(
+            resize_rect(original, RectHandle::TopLeft, [5.0, 6.0]),
+            ImageRect::new([5.0, 6.0], original.max)
+        );
+        assert_eq!(
+            resize_rect(original, RectHandle::TopRight, [90.0, 6.0]),
+            ImageRect::new([original.min[0], 6.0], [90.0, original.max[1]])
+        );
+        assert_eq!(
+            resize_rect(original, RectHandle::BottomLeft, [5.0, 95.0]),
+            ImageRect::new([5.0, original.min[1]], [original.max[0], 95.0])
+        );
     }
 
     #[test]
@@ -1434,6 +1476,14 @@ mod tests {
         );
         assert_eq!(
             reverse_interaction_action(false, true, Some([0.25, 0.75]), 0.02),
+            ReverseInteraction::Cancel
+        );
+        assert_eq!(
+            reverse_interaction_action(true, false, None, 0.02),
+            ReverseInteraction::None
+        );
+        assert_eq!(
+            reverse_interaction_action(true, true, Some([0.25, 0.75]), 0.02),
             ReverseInteraction::Cancel
         );
     }

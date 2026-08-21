@@ -22,7 +22,6 @@ use std::{
 use image::{
     ColorType, ImageDecoder, ImageError, ImageFormat,
     codecs::{jpeg::JpegDecoder, png::PngDecoder},
-    metadata::Orientation,
 };
 
 use crate::curve::{CurveInterpolation, CurveMode, CurveSet, LuminanceDefinition, luma};
@@ -229,12 +228,13 @@ pub fn decode_image_bytes_with_alpha(
             let dimensions = decoder.dimensions();
             let icc = decoder.icc_profile().map_err(PipelineError::Image)?;
             let exif = decoder.exif_metadata().map_err(PipelineError::Image)?;
+            let orientation = decoder.orientation().map_err(PipelineError::Image)?;
             (
                 dimensions,
                 icc,
                 exif,
                 has_png_srgb_chunk(bytes),
-                Orientation::NoTransforms,
+                orientation,
             )
         }
         InputFormat::Jpeg => {
@@ -256,6 +256,7 @@ pub fn decode_image_bytes_with_alpha(
     let detected_colour_space = detected_from_icc
         .or(detected_from_exif)
         .or(detected_from_png);
+    let input_colour_space = detected_colour_space.unwrap_or(InputColourSpace::Srgb);
     let profile = EmbeddedProfile {
         label: icc_profile
             .as_deref()
@@ -291,15 +292,22 @@ pub fn decode_image_bytes_with_alpha(
             if alpha < 1.0 && alpha_policy == AlphaPolicy::RejectTransparency {
                 return Err(PipelineError::TransparencyNeedsConfirmation);
             }
+            if alpha >= 1.0 {
+                return Ok([pixel[0], pixel[1], pixel[2]]);
+            }
             let background = match alpha_policy {
                 AlphaPolicy::RejectTransparency => [0.0; 3],
                 AlphaPolicy::FlattenOver(background) => background,
             };
-            Ok([
-                (pixel[0] * alpha + background[0] * (1.0 - alpha)).clamp(0.0, 1.0),
-                (pixel[1] * alpha + background[1] * (1.0 - alpha)).clamp(0.0, 1.0),
-                (pixel[2] * alpha + background[2] * (1.0 - alpha)).clamp(0.0, 1.0),
-            ])
+            Ok(std::array::from_fn(|channel| {
+                let foreground_linear = decode_input_channel(pixel[channel], input_colour_space);
+                let background_linear =
+                    decode_input_channel(background[channel], input_colour_space);
+                encode_input_channel(
+                    foreground_linear * alpha + background_linear * (1.0 - alpha),
+                    input_colour_space,
+                )
+            }))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -732,11 +740,28 @@ fn encode_srgb(linear: f32) -> f32 {
     }
 }
 
+fn decode_input_channel(value: f32, colour_space: InputColourSpace) -> f32 {
+    match colour_space {
+        InputColourSpace::Srgb => decode_srgb(value),
+        InputColourSpace::AdobeRgb => decode_adobe_rgb(value),
+    }
+}
+
+fn encode_input_channel(value: f32, colour_space: InputColourSpace) -> f32 {
+    match colour_space {
+        InputColourSpace::Srgb => encode_srgb(value),
+        InputColourSpace::AdobeRgb => encode_adobe_rgb(value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicBool;
 
-    use image::{ImageBuffer, Rgb, codecs::jpeg::JpegEncoder};
+    use image::{
+        ExtendedColorType, ImageBuffer, ImageEncoder, Rgb,
+        codecs::{jpeg::JpegEncoder, png::PngEncoder},
+    };
 
     use super::{
         HistogramCalculation, InputColourSpace, InputFormat, LuminanceDefinition, PipelineSnapshot,
@@ -761,7 +786,21 @@ mod tests {
             source.profile.detected_colour_space,
             Some(InputColourSpace::AdobeRgb)
         );
+        assert_eq!([source.width, source.height], [320, 192]);
         assert_eq!(source.pixels.len(), (source.width * source.height) as usize);
+        let tolerance = 2.0 / f32::from(u16::MAX);
+        let assert_pixel = |actual: [f32; 3], expected: [f32; 3]| {
+            assert!(
+                actual
+                    .into_iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| (actual - expected).abs() <= tolerance),
+                "actual={actual:?}, expected={expected:?}"
+            );
+        };
+        assert_pixel(source.pixels[0], [0.0; 3]);
+        assert_pixel(source.pixels[40], [40.0 / 319.0, 0.12, 0.08]);
+        assert_pixel(source.pixels[(191 * 320) + 319], [0.9, 0.9, 0.1]);
     }
 
     #[test]
@@ -1058,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn transparent_input_requires_confirmation_and_can_flatten_over_white() {
+    fn transparent_input_requires_confirmation_and_can_flatten_over_black_in_linear_light() {
         use png::{BitDepth, ColorType, Encoder};
 
         let mut bytes = Vec::new();
@@ -1074,9 +1113,48 @@ mod tests {
             Err(super::PipelineError::TransparencyNeedsConfirmation)
         ));
         let flattened =
-            super::decode_image_bytes_with_alpha(&bytes, super::AlphaPolicy::FlattenOver([1.0; 3]))
+            super::decode_image_bytes_with_alpha(&bytes, super::AlphaPolicy::FlattenOver([0.0; 3]))
                 .unwrap();
-        assert_eq!(flattened.pixels.as_slice(), &[[1.0; 3]]);
+        assert_eq!(flattened.pixels.as_slice(), &[[0.0; 3]]);
+    }
+
+    #[test]
+    fn semi_transparent_pixels_are_flattened_in_linear_light() {
+        use png::{BitDepth, ColorType, Encoder};
+
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[255, 0, 0, 128]).unwrap();
+        }
+
+        let flattened =
+            super::decode_image_bytes_with_alpha(&bytes, super::AlphaPolicy::FlattenOver([0.0; 3]))
+                .unwrap();
+        let expected = super::encode_srgb(128.0 / 255.0);
+        assert!((flattened.pixels[0][0] - expected).abs() < 0.002);
+        assert!(flattened.pixels[0][0] > 0.7);
+    }
+
+    #[test]
+    fn png_exif_orientation_is_applied_before_pixels_are_exposed() {
+        let pixels = [255_u8, 0, 0, 0, 0, 255];
+        let tiff = [
+            b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0,
+            0,
+        ];
+        let mut png = Vec::new();
+        let mut encoder = PngEncoder::new(&mut png);
+        encoder.set_exif_metadata(tiff.to_vec()).unwrap();
+        encoder
+            .write_image(&pixels, 2, 1, ExtendedColorType::Rgb8)
+            .unwrap();
+
+        let source = decode_image_bytes(&png).expect("oriented PNG decodes");
+        assert_eq!((source.width, source.height), (1, 2));
     }
 
     #[test]

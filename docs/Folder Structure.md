@@ -7,76 +7,43 @@ aliases:
 
 # Folder Structure
 
-This note distinguishes the current repository from the intended long-term layout. The tree is still changing rapidly, so documentation should not pretend that planned locations already exist.
+The repository is still changing rapidly. Current and planned locations are distinguished below; planned paths must not be described as though they already exist.
 
 ## Current repository
 
-### `crates/focal-editor`
+```text
+crates/
+  focal-core/           production processing architecture
+  focal-editor/         standalone desktop editor
+  exposure-cruve-tool/  FocalCurve experimental harness
+  better-plots/         FocalPlot experimental harness
+data/                   development data and prototype edit state
+docs/                   project documentation and Obsidian vault
+OLD_EDITOR/             GUI reference from the predecessor project
+test-image/             controlled test images
+```
 
-The Focal Editor application. Its initial GUI description is documented in [[Focal-Editor Old GUI]]; keep the first implementation narrow and do not carry over the old processing model.
+`cruve` is a historical spelling mistake. Use **FocalCurve** in product documentation and `focal-curve` for the eventual package and folder name. Likewise, **FocalPlot** is the product name and `focal-plot` is the intended package and folder name.
 
-### `crates/focal-core`
+FocalCurve and FocalPlot remain independently runnable visual harnesses and may supply reusable widgets. Validated processing semantics belong in FocalCore; shared decoding, profiles, metadata, orientation, transparency handling, output conversion, and encoding belong at the planned `focal-io` boundary.
 
-The core image-processing pipeline shared by FocalPlane applications.
+## OLD_EDITOR
 
-### `crates/exposure-cruve-tool`
+`OLD_EDITOR` is only a high-level GUI reference. Its processing pipeline and film-photography model do not carry into this rewrite.
 
-The current experimental curve application. `cruve` is a historical spelling mistake. Its canonical product/documentation name is **FocalCurve**, and its eventual Rust package and folder name is `focal-curve`.
+## Intended layout
 
-### `crates/better-plots`
+Focal Editor may eventually move to `apps/focal-editor`. The intended shared libraries are:
 
-The current experimental plotting application. Its canonical product/documentation name is **FocalPlot**, and its eventual Rust package and folder name is `focal-plot`.
+- `crates/focal-io` — file and metadata boundaries;
+- `crates/focal-curve` — standalone curve harness and reusable widget;
+- `crates/focal-plot` — standalone scope harness and reusable widgets.
 
-FocalCurve and FocalPlot should remain independently runnable harnesses for focused visual experimentation while also providing reusable widgets. Their image-processing semantics must move toward shared FocalCore and `focal-io` boundaries rather than becoming alternative production pipelines.
-
-### `data`
-
-Application data during development. Prototype JSON sidecars and other editable state may begin here. In future, appropriate data may live in the user's home directory or FocalLib database.
-
-### `docs`
-
-Project documentation and the Obsidian vault.
-
-### `OLD_EDITOR`
-
-Source from the old Focal Plane editor, renamed Focal Editor in this project. This code is retained as a rough GUI reference and to avoid needless rewriting. It is not the architectural basis for the new processing pipeline, and its film-photography concepts do not carry over.
-
-### `test-image`
-
-Test images for verification and controlled processing tests.
-
-## Intended application layout
-
-### `apps/focal-editor`
-
-Focal Editor may eventually live as an application here rather than under `crates`.
-
-### `crates/focal-io`
-
-The planned shared file boundary for decoding, input-profile interpretation, orientation, metadata, alpha handling, output colour conversion, and encoding. This is not a second processing pipeline: it prepares explicit image buffers for FocalCore and writes FocalCore results.
-
-### `crates/focal-curve`
-
-The canonical future name for FocalCurve. It remains a standalone experiment and supplies a reusable curve widget for Focal Editor.
-
-### `crates/focal-plot`
-
-The canonical future name for FocalPlot. It remains a standalone experiment and supplies reusable scope widgets for Focal Editor.
+Renames and moves should be isolated mechanical changes rather than mixed with processing work.
 
 ## External folders
 
-### `/home/estiaan/code/FocalPlane`
+- `/home/estiaan/code/FocalPlane` — predecessor project;
+- `/home/estiaan/code/Reference_Projects` — local references including darktable, RawTherapee, Filmulator, and Spektrafilm.
 
-The predecessor project. This repository is a rewrite.
-
-### `/home/estiaan/code/Reference_Projects`
-
-Reference open-source photo editors such as Filmulator, darktable, RawTherapee, and Spektrafilm.
-
-## Related documentation
-
-- [[FocalPlane]] — project overview and rewrite status
-- [[Focal Editor & Focal Core]] — editor and processing responsibilities
-- [[MVP]] — current development scope
-- [[Architecture Decisions]] — binding architectural and colour-domain decisions
-- [[Clean Architecture Migration]] — instructions for reaching the intended layout safely
+See [[Architecture Decisions]] for binding boundaries and [[Clean Architecture Migration]] for the remaining consolidation work.

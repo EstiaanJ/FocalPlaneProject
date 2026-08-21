@@ -104,3 +104,39 @@ where
         self(progress);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_tokens_are_shared_and_idempotent() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        assert!(!token.is_cancelled());
+        assert!(!clone.is_cancelled());
+
+        token.cancel();
+
+        assert!(token.is_cancelled());
+        assert!(clone.is_cancelled());
+        token.cancel();
+        assert!(clone.is_cancelled());
+    }
+
+    #[test]
+    fn render_context_preserves_quality_and_shares_cancellation() {
+        for quality in [RenderQuality::Preview, RenderQuality::Export] {
+            let token = CancellationToken::new();
+            let context = RenderContext::with_cancellation(quality, token.clone());
+            assert_eq!(context.quality(), quality);
+            assert!(!context.is_cancelled());
+
+            token.cancel();
+
+            assert!(context.is_cancelled());
+            assert!(context.cancellation_token().is_cancelled());
+        }
+        assert_eq!(RenderContext::default().quality(), RenderQuality::Preview);
+    }
+}

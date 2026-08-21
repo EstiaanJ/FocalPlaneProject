@@ -216,8 +216,14 @@ mod tests {
 
     #[test]
     fn encoded_contracts_are_bounded_but_linear_contracts_are_not() {
+        assert!(Image::new(1, 1, vec![[0.0; 3]], ImageContract::SRGB_DISPLAY).is_ok());
+        assert!(Image::new(1, 1, vec![[1.0; 3]], ImageContract::SRGB_DISPLAY).is_ok());
         assert_eq!(
             Image::new(1, 1, vec![[1.01, 0.0, 0.0]], ImageContract::SRGB_DISPLAY,).unwrap_err(),
+            ImageError::OutOfRangeEncodedPixel
+        );
+        assert_eq!(
+            Image::new(1, 1, vec![[-0.01, 0.0, 0.0]], ImageContract::SRGB_DISPLAY).unwrap_err(),
             ImageError::OutOfRangeEncodedPixel
         );
         assert!(

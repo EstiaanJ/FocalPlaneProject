@@ -351,8 +351,8 @@ fn validate_crop(crop: CropSettings) -> Result<(), &'static str> {
     if values.iter().any(|value| !value.is_finite()) {
         return Err("crop values must be finite");
     }
-    if !(0.0..1.0).contains(&crop.left)
-        || !(0.0..1.0).contains(&crop.top)
+    if !(0.0..=1.0).contains(&crop.left)
+        || !(0.0..=1.0).contains(&crop.top)
         || !(0.0..=1.0).contains(&crop.right)
         || !(0.0..=1.0).contains(&crop.bottom)
         || crop.left >= crop.right
@@ -533,4 +533,219 @@ fn linear_adobe_rgb_to_srgb(rgb: [f32; 3]) -> [f32; 3] {
         rgb[1],
         -0.042_929 * rgb[1] + 1.042_929 * rgb[2],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn module(parameters: ModuleParameters) -> Module {
+        Module {
+            enabled: true,
+            parameters,
+        }
+    }
+
+    #[test]
+    fn percentage_adjustments_accept_limits_and_reject_both_sides() {
+        let cases = [
+            (-100.0, true),
+            (-100.001, false),
+            (100.0, true),
+            (100.001, false),
+        ];
+        for (value, valid) in cases {
+            assert_eq!(
+                module(ModuleParameters::Saturation { amount: value })
+                    .validate()
+                    .is_ok(),
+                valid,
+                "saturation={value}"
+            );
+            assert_eq!(
+                module(ModuleParameters::WhiteBalance {
+                    warmth: value,
+                    tint: 0.0,
+                })
+                .validate()
+                .is_ok(),
+                valid,
+                "warmth={value}"
+            );
+            assert_eq!(
+                module(ModuleParameters::LocalContrast {
+                    amount: value,
+                    radius: 1.0,
+                })
+                .validate()
+                .is_ok(),
+                valid,
+                "local contrast={value}"
+            );
+            assert_eq!(
+                module(ModuleParameters::Contrast { amount: value })
+                    .validate()
+                    .is_ok(),
+                valid,
+                "contrast={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn white_balance_tint_accepts_percentage_limits_and_rejects_both_sides() {
+        let cases = [
+            (-100.0, true),
+            (-100.001, false),
+            (100.0, true),
+            (100.001, false),
+        ];
+        for (value, valid) in cases {
+            assert_eq!(
+                module(ModuleParameters::WhiteBalance {
+                    warmth: 0.0,
+                    tint: value,
+                })
+                .validate()
+                .is_ok(),
+                valid,
+                "tint={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_contrast_radius_accepts_limits_and_rejects_both_sides() {
+        for (value, valid) in [(1.0, true), (0.999, false), (256.0, true), (256.001, false)] {
+            assert_eq!(
+                module(ModuleParameters::LocalContrast {
+                    amount: 0.0,
+                    radius: value,
+                })
+                .validate()
+                .is_ok(),
+                valid,
+                "radius={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn noise_reduction_limits_accept_zero_and_hundred_only() {
+        for (value, valid) in [
+            (0.0, true),
+            (-0.001, false),
+            (100.0, true),
+            (100.001, false),
+        ] {
+            assert_eq!(
+                module(ModuleParameters::NoiseReduction {
+                    luminance: value,
+                    colour: 0.0,
+                })
+                .validate()
+                .is_ok(),
+                valid,
+                "luminance={value}"
+            );
+            assert_eq!(
+                module(ModuleParameters::NoiseReduction {
+                    luminance: 0.0,
+                    colour: value,
+                })
+                .validate()
+                .is_ok(),
+                valid,
+                "colour={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn exposure_accepts_finite_values_and_rejects_non_finite_values() {
+        for (value, valid) in [
+            (f32::NEG_INFINITY, false),
+            (-1.0, true),
+            (0.0, true),
+            (1.0, true),
+            (f32::INFINITY, false),
+        ] {
+            assert_eq!(
+                module(ModuleParameters::Exposure { stops: value })
+                    .validate()
+                    .is_ok(),
+                valid,
+                "exposure={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn adjustment_validation_rejects_non_finite_percentage_values() {
+        for value in [f32::NEG_INFINITY, f32::NAN, f32::INFINITY] {
+            assert!(
+                module(ModuleParameters::Saturation { amount: value })
+                    .validate()
+                    .is_err(),
+                "saturation={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_contracts_distinguish_working_space_stages_from_boundary_stages() {
+        let working = WorkingSpace::LinearAdobeRgb.image_contract();
+        let working_parameters = [
+            ModuleParameters::WhiteBalance {
+                warmth: 0.0,
+                tint: 0.0,
+            },
+            ModuleParameters::Exposure { stops: 0.0 },
+            ModuleParameters::HighlightsAndShadows,
+            ModuleParameters::Contrast { amount: 0.0 },
+            ModuleParameters::TonalCurve {
+                curves: CurveSet::default(),
+                mode: CurveMode::LinkedRgb,
+            },
+            ModuleParameters::LocalContrast {
+                amount: 0.0,
+                radius: 1.0,
+            },
+            ModuleParameters::Saturation { amount: 0.0 },
+            ModuleParameters::CreativeColour,
+            ModuleParameters::NoiseReduction {
+                luminance: 0.0,
+                colour: 0.0,
+            },
+            ModuleParameters::Sharpening,
+            ModuleParameters::OutputTransform,
+        ];
+        for parameters in working_parameters {
+            assert_eq!(
+                module(parameters).required_contract(WorkingSpace::LinearAdobeRgb),
+                Some(working)
+            );
+        }
+
+        let boundary_parameters = [
+            ModuleParameters::InputTransform,
+            ModuleParameters::OrientationAndCrop { crop: None },
+            ModuleParameters::Resize,
+            ModuleParameters::QuantisationAndDither,
+        ];
+        for parameters in boundary_parameters {
+            assert_eq!(
+                module(parameters).required_contract(WorkingSpace::LinearAdobeRgb),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn crop_safety_rejects_non_finite_and_non_positive_aspects() {
+        let crop = CropSettings::full_image();
+        for aspect in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(!crop.is_safe_for_aspect(aspect), "aspect={aspect}");
+        }
+    }
 }

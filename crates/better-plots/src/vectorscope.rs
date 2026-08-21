@@ -890,6 +890,39 @@ mod tests {
         let [x, y] = rgb_to_cie1931_xy([1.0, 1.0, 1.0]);
         assert!((x - 0.312_7).abs() < 0.001);
         assert!((y - 0.329_0).abs() < 0.001);
+        let [x, y] = rgb_to_cie1931_xy([0.0, 0.0, 0.0]);
+        assert!((x - 0.312_7).abs() < 0.001);
+        assert!((y - 0.329_0).abs() < 0.001);
+    }
+
+    #[test]
+    fn hue_and_display_helpers_cover_wraparound_and_both_scope_spaces() {
+        for hue in [0.0, 1.0, -1.0, 0.25, 0.5, 0.75] {
+            let colour = ring_colour(hue);
+            assert!(colour.r() > 0 || colour.g() > 0 || colour.b() > 0);
+        }
+        for space in [ScopeSpace::Ryb, ScopeSpace::Cie1931] {
+            for scale in [DensityScale::Linear, DensityScale::Logarithmic] {
+                assert_eq!(
+                    display_coordinate(
+                        match space {
+                            ScopeSpace::Ryb => [0.5, 0.5],
+                            ScopeSpace::Cie1931 => [0.312_7 / CIE_X_MAX, 1.0 - 0.329_0 / CIE_Y_MAX],
+                        },
+                        space,
+                        scale,
+                    ),
+                    Some(match space {
+                        ScopeSpace::Ryb => [0.5, 0.5],
+                        ScopeSpace::Cie1931 => [0.312_7 / CIE_X_MAX, 1.0 - 0.329_0 / CIE_Y_MAX],
+                    })
+                );
+            }
+        }
+        assert_eq!(
+            display_coordinate([f32::NAN, 0.5], ScopeSpace::Ryb, DensityScale::Linear),
+            None
+        );
     }
 
     #[test]
@@ -1086,6 +1119,71 @@ mod tests {
                 actual: 3
             })
         ));
+
+        let malformed_colours = VectorscopeAnalysis {
+            density: vec![0.0; 4],
+            colours: vec![[0.0; 3]; 3],
+            ..malformed
+        };
+        assert!(matches!(
+            render_trace(&malformed_colours, 1.0, 1.0, DensityScale::Linear, false),
+            Err(TraceRenderError::ColourLength {
+                expected: 4,
+                actual: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn trace_rendering_handles_both_spaces_density_edges_and_highlight() {
+        for space in [ScopeSpace::Ryb, ScopeSpace::Cie1931] {
+            let analysis = VectorscopeAnalysis {
+                space,
+                resolution: 3,
+                density: vec![1.0; 9],
+                colours: vec![[0.2, 0.4, 0.8]; 9],
+                sampled_pixels: 1,
+            };
+            let normal = render_trace(&analysis, 1.0, 1.0, DensityScale::Linear, false)
+                .expect("valid trace request");
+            let inverted = render_trace(&analysis, 1.0, 1.0, DensityScale::Linear, true)
+                .expect("valid inverse trace request");
+            assert_eq!(normal.size, [3, 3]);
+            assert!(normal.pixels.iter().any(|pixel| pixel.a() > 0));
+            assert_ne!(normal.pixels, inverted.pixels);
+            let zero_intensity =
+                render_trace(&analysis, 0.0, 0.0, DensityScale::Logarithmic, false)
+                    .expect("zero intensity is a valid presentation boundary");
+            assert!(zero_intensity.pixels.iter().all(|pixel| pixel.a() == 0));
+        }
+    }
+
+    #[test]
+    fn interpolation_helpers_cover_edges_and_empty_density() {
+        let density = [0.0, 1.0, 2.0, 3.0];
+        assert!((bilinear_density(&density, 2, 0.5, 0.5) - 1.5).abs() < 1.0e-6);
+        let colours = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ];
+        assert!(
+            bilinear_colour(&colours, 2, 0.0, 0.0)
+                .iter()
+                .all(|value| value.abs() < f32::EPSILON)
+        );
+        assert!(
+            bilinear_colour(&colours, 2, 1.0, 1.0)
+                .iter()
+                .all(|value| (*value - 1.0).abs() < f32::EPSILON)
+        );
+        assert_eq!(normalise_density(&[], 0, 2), Vec::<f32>::new());
+        assert!(normalise_density(&[0.0, 1.0], 1, 1)[1] > 0.0);
+        for sector in 0..6 {
+            let rgb = hsv_to_rgb(sector as f32 / 6.0, 1.0, 1.0);
+            assert!(rgb.iter().all(|value| (0.0..=1.0).contains(value)));
+        }
     }
 
     #[test]

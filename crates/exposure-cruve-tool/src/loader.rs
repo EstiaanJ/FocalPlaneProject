@@ -84,7 +84,7 @@ impl ImageLoader {
     }
 
     pub fn open_confirmed_flatten(&mut self, path: PathBuf) -> u64 {
-        self.open_with_alpha_policy(path, AlphaPolicy::FlattenOver([1.0; 3]))
+        self.open_with_alpha_policy(path, AlphaPolicy::FlattenOver([0.0; 3]))
     }
 
     fn open_with_alpha_policy(&mut self, path: PathBuf, alpha_policy: AlphaPolicy) -> u64 {

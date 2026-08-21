@@ -341,7 +341,10 @@ mod tests {
         ExtendedColorType, ImageBuffer, ImageEncoder, Rgb,
         codecs::{jpeg::JpegEncoder, png::PngEncoder},
     };
-    use std::{thread, time::Duration};
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
 
     fn tiny_image() -> Arc<LoadedImage> {
         Arc::new(LoadedImage {
@@ -391,7 +394,8 @@ mod tests {
 
         let mut saw_rectangle = false;
         let mut saw_hover = false;
-        for _ in 0..2000 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
             for event in loader.poll() {
                 if let LoadEvent::Analysed { id, .. } = event {
                     saw_rectangle |= id == rectangle_id;

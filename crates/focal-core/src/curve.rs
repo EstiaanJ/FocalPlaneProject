@@ -309,8 +309,25 @@ mod tests {
     #[test]
     fn identity_curve_is_identity_at_and_between_points() {
         let curve = SmoothCurve::identity();
-        for x in [0.0, 0.03, 0.25, 0.41, 0.75, 1.0] {
-            assert!((curve.evaluate(x) - x).abs() < 1e-5, "x={x}");
+        for x in [
+            f32::NEG_INFINITY,
+            -0.01,
+            0.0,
+            0.03,
+            0.25,
+            0.41,
+            0.75,
+            1.0,
+            1.01,
+            f32::INFINITY,
+            f32::NAN,
+        ] {
+            let expected = if x.is_finite() {
+                x.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            assert!((curve.evaluate(x) - expected).abs() < 1e-5, "x={x}");
         }
     }
 
@@ -342,6 +359,27 @@ mod tests {
                 CurvePoint { x: 0.0, y: 0.5 },
             ]),
             Err(CurveError::DuplicateX { index: 1 })
+        );
+        for point in [
+            CurvePoint { x: -0.001, y: 0.5 },
+            CurvePoint { x: 0.5, y: -0.001 },
+            CurvePoint { x: 1.001, y: 0.5 },
+            CurvePoint { x: 0.5, y: 1.001 },
+        ] {
+            assert!(matches!(
+                SmoothCurve::from_points(vec![CurvePoint { x: 0.0, y: 0.0 }, point]),
+                Err(CurveError::PointOutOfRange { .. })
+            ));
+        }
+        assert_eq!(
+            SmoothCurve::from_points(vec![
+                CurvePoint { x: 0.0, y: 0.0 },
+                CurvePoint {
+                    x: f32::INFINITY,
+                    y: 0.5,
+                },
+            ]),
+            Err(CurveError::NonFinitePoint { index: 1 })
         );
     }
 

@@ -30,7 +30,7 @@ The first implementation follows [[Focal-Editor Old GUI]] and is deliberately na
 - save editable parameters as a versioned JSON sidecar;
 - export an 8-bit sRGB PNG.
 
-The initial GUI description excludes the curve control, crop controls, and the old response curve. FocalPlot scopes remain an integration step after their GUI-independent analysis has been extracted. This is a GUI scope decision, not permission to create a second processing pipeline.
+The initial GUI description excluded the curve control, crop controls, and the old response curve. Crop and FocalCore-backed scope analysis were subsequently approved and implemented in Phase One. The advanced curve control and old response curve remain excluded. These GUI scope decisions never permit a second processing pipeline.
 
 ## Standalone editor
 

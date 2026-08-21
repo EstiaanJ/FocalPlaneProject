@@ -511,6 +511,8 @@ mod tests {
 
     #[test]
     fn crop_safety_can_be_checked_before_submitting_a_render() {
+        assert!(CropSettings::full_image().is_safe_for_aspect(1.0));
+        assert!(CropSettings::largest_safe_straightened(1.0, 0.0).is_safe_for_aspect(1.0));
         let full_rotated = CropSettings {
             rotation_degrees: 15.0,
             ..CropSettings::full_image()
@@ -519,6 +521,44 @@ mod tests {
         assert!(
             CropSettings::largest_safe_straightened(3.0 / 2.0, 15.0).is_safe_for_aspect(3.0 / 2.0)
         );
+    }
+
+    #[test]
+    fn crop_validation_accepts_image_edges_but_rejects_values_outside_them() {
+        let source = Image::new(2, 2, vec![[0.5; 3]; 4], ImageContract::SRGB_DISPLAY).unwrap();
+        let cases = [
+            (CropSettings::full_image(), true),
+            (
+                CropSettings {
+                    left: -f32::EPSILON,
+                    ..CropSettings::full_image()
+                },
+                false,
+            ),
+            (
+                CropSettings {
+                    right: 1.0 + f32::EPSILON,
+                    ..CropSettings::full_image()
+                },
+                false,
+            ),
+            (
+                CropSettings {
+                    left: 0.5,
+                    right: 0.5,
+                    ..CropSettings::full_image()
+                },
+                false,
+            ),
+        ];
+
+        for (crop, valid) in cases {
+            let mut snapshot = Pipeline::default().snapshot();
+            snapshot.modules[1].parameters =
+                ModuleParameters::OrientationAndCrop { crop: Some(crop) };
+            let result = Pipeline::from_snapshot(snapshot).render(source.clone());
+            assert_eq!(result.is_ok(), valid, "crop={crop:?}");
+        }
     }
 
     #[test]

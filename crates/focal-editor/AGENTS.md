@@ -2,9 +2,9 @@
 
 Focal Editor is the standalone desktop editor described in `../../docs/Focal-Editor Old GUI.md`, `../../docs/MVP.md`, and `../../docs/Focal Editor & Focal Core.md`.
 
-## Scope of this first slice
+## Original slice and approved Phase One work
 
-- Open one PNG or JPEG directly; do not require FocalLib or an import/catalogue workflow.
+- Open one PNG, JPEG, or TIFF directly; do not require FocalLib or an import/catalogue workflow.
 - Show Before and After previews.
 - Implement exposure in stops and contrast from `-100` to `+100`.
 - Keep a small input/output histogram visible.
@@ -17,7 +17,7 @@ Focal Editor is the standalone desktop editor described in `../../docs/Focal-Edi
   the same top bar.
 - Make the major rails and subpanels resizable: left/right rail widths, filmstrip height, Navigator height, and histogram-panel height.
 
-The human GUI description currently says not to include the curve control, crop controls, or the old response curve. Do not add those speculatively. FocalPlot scope widgets will be integrated after their GUI-independent analysis is extracted and the outstanding bugs are fixed.
+The original GUI description excluded the curve control, crop controls, and old response curve. Crop and FocalCore-backed scope presentation were subsequently approved and implemented in MVP Phase One. The advanced curve control and old response curve remain excluded; follow `../../docs/MVP.md` for later approved scope.
 
 ## Boundaries
 
@@ -26,7 +26,7 @@ The human GUI description currently says not to include the curve control, crop 
 - Keep all image processing in FocalCore. Do not create an editor-specific processing pipeline.
 - Do not make FocalCore depend on egui, eframe, or file dialogs.
 - Use immutable preview requests and ignore stale results.
-- Do not silently decide unresolved colour-management or saved-state semantics. This first prototype uses the current FocalCore decoded sRGB contract and records its limitation.
+- Do not silently decide unresolved colour-management or saved-state semantics. Decoded inputs now enter FocalCore with explicit sRGB or canonical Adobe RGB contracts; shared file-boundary ownership still belongs in the planned `focal-io` crate.
 
 ## Quality
 
