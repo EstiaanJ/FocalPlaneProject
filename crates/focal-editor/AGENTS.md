@@ -1,6 +1,6 @@
 # Focal Editor
 
-Focal Editor is the standalone desktop editor described in `../../docs/Focal-Editor Old GUI.md`, `../../docs/MVP.md`, and `../../docs/Focal Editor & Focal Core.md`.
+Focal Editor is the standalone desktop editor described in `../../docs/MVP.md` and `../../docs/Focal Editor & Focal Core.md`.
 
 ## Original slice and approved Phase One work
 
@@ -11,13 +11,12 @@ Focal Editor is the standalone desktop editor described in `../../docs/Focal-Edi
 - Save editable state as a versioned JSON sidecar.
 - Export an 8-bit sRGB PNG.
 - Keep the UI responsive with background loading/rendering and latest-request-wins result handling.
-- Match the old editor's high-level layout: Navigator at the upper left, presets below it, histograms at the top of the right rail, controls below the histograms, the photo viewer in the centre, and the filmstrip along the bottom.
-- Keep the old editor's loading/progress treatment in the top bar; the status
-  remains there and the `FOCALPLANE` all-caps title sits at the far right of
-  the same top bar.
+- Keep the current high-level layout: Navigator at the upper left, presets below it, histograms at the top of the right rail, controls below the histograms, the photo viewer in the centre, and the filmstrip along the bottom.
+- Keep the loading/progress treatment in the top bar; the status remains there
+  and the `FOCALPLANE` all-caps title sits at the far right of the same top bar.
 - Make the major rails and subpanels resizable: left/right rail widths, filmstrip height, Navigator height, and histogram-panel height.
 
-The original GUI description excluded the curve control, crop controls, and old response curve. Crop and FocalCore-backed scope presentation were subsequently approved and implemented in MVP Phase One. The advanced curve control and old response curve remain excluded; follow `../../docs/MVP.md` for later approved scope.
+The current MVP scope excludes the advanced curve editor and response-curve controls. Crop and FocalCore-backed scope presentation were subsequently approved and implemented in MVP Phase One; follow `../../docs/MVP.md` for the later approved scope.
 
 ## Boundaries
 

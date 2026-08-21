@@ -186,8 +186,7 @@ The existing image-to-scope hover and spatial rectangle experiment may remain in
 - Focal Editor remains usable without FocalLib.
 - The MVP uses an opinionated ordered pipeline, not a DAG.
 - Crop is the approved Phase One geometry tool; local adjustments remain excluded.
-- The old editor is a GUI reference only.
-- Focal Editor implementation follows the initial human GUI description in [[Focal-Editor Old GUI]]; subsequent consequential GUI changes still require human input.
+- Focal Editor implementation follows the current product and interaction decisions in [[FocalPlane]], [[MVP]], [[Focal Editor & Focal Core]], and [[Sliders]]; subsequent consequential GUI changes still require human input.
 - Agents must bring consequential colour, interaction, and architectural decisions back to the human owner.
 
 See [[Clean Architecture Migration]] for the instructions which put these decisions into practice.

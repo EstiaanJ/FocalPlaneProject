@@ -1,8 +1,8 @@
 # Focal Editor
 
-The first standalone Focal Editor GUI slice follows [`docs/Focal-Editor Old GUI.md`](../../docs/Focal-Editor%20Old%20GUI.md): open one PNG or JPEG directly, show Before and After previews, adjust exposure and contrast, and keep a histogram visible. It uses egui/eframe and performs image loading and preview rendering away from the UI thread.
+The standalone Focal Editor GUI opens one PNG, JPEG, or TIFF directly, shows Before and After previews, exposes global adjustments, and keeps a histogram visible. It uses egui/eframe and performs image loading and preview rendering away from the UI thread. The current scope is recorded in [`docs/MVP.md`](../../docs/MVP.md) and [`docs/Focal Editor & Focal Core.md`](../../docs/Focal%20Editor%20%26%20Focal%20Core.md).
 
-Its layout follows the old editor's visual structure: Navigator at the upper left, presets beneath it, histograms and FocalPlot scopes at the top of the right rail, controls below them, the image viewer in the centre, and a filmstrip along the bottom. The top bar carries the loading indicator and status, with `FOCALPLANE` at the far right.
+Its layout has Navigator and presets at the upper left, histograms and FocalPlot scopes at the top of the right rail, controls below them, the image viewer in the centre, and a filmstrip along the bottom. The top bar carries the loading indicator and status, with `FOCALPLANE` at the far right.
 
 The rail widths and the Navigator, histogram, and filmstrip subpanel sizes can be adjusted with draggable splitters.
 

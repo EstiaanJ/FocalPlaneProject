@@ -64,4 +64,4 @@ The future technical preset editor may benefit from an ordered module stack, ric
 
 If real requirements later emerge for branching, multiple inputs, masks, reusable subgraphs, or parameter-control connections, the modular pipeline can evolve into a graph. Do not build graph IDs, arbitrary ports, graph scheduling, cycles, or graph serialisation before those requirements exist.
 
-vkdt, listed with the [[Folder Structure#External folders|external reference projects]], is a useful reference for a mature two-level module and execution-node DAG, typed connectors, region-of-interest propagation, and topological scheduling. It demonstrates what becomes possible, not what Focal Core must implement for MVP.
+vkdt is a useful external reference for a mature two-level module and execution-node DAG, typed connectors, region-of-interest propagation, and topological scheduling. It demonstrates what becomes possible, not what Focal Core must implement for MVP.

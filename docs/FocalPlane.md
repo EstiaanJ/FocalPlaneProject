@@ -7,7 +7,7 @@ aliases:
 # FocalPlane
 
 > [!important] Rewrite
-> This project is a rewrite of the predecessor project at `/home/estiaan/code/FocalPlane`. The old Focal Plane editor in [[Folder Structure#OLD_EDITOR|OLD_EDITOR]] is a GUI reference only. I like the GUI as it is, with some exceptions, and keeping it avoids too much rewriting of code. I do not want to carry over the old processing pipeline or its film-photography model.
+> This project is a rewrite of the predecessor project at `/home/estiaan/code/FocalPlane`. The new production architecture is centred on FocalCore; the predecessor's processing pipeline and film-photography model are not carried over.
 
 FocalPlane is a Rust photo-editing suite built primarily for my own workflow and my Fujifilm X-T5. Broader usefulness is welcome but secondary. I eventually want to support photos from my iPhone as well.
 
@@ -71,7 +71,6 @@ Lightroom and the iPhone gallery editor are the closest existing references for 
 - [[Testing]] — reference implementation and reproducibility
 - [[Engineering Principles]] — correctness, maintainability, testing, and human involvement
 - [[Vectorscope Research]] — vectorscope algorithm research and FocalPlane design direction
-- [[Folder Structure]] — repository layout, old code, and external references
 - [[Open Questions]] — decisions deliberately left unanswered
 - [[Architecture Decisions]] — decisions settled by the human owner
 - [[Clean Architecture Migration]] — instructions for the next architectural phase

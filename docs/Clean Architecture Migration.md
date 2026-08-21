@@ -7,7 +7,7 @@ aliases:
 
 # Clean architecture migration
 
-This is the implementation guide for consolidating the current experiments into the architecture defined by [[Architecture Decisions]]. The initial Focal Editor GUI description is now documented in [[Focal-Editor Old GUI]]. Keep later GUI decisions in a dedicated description rather than silently expanding this migration guide.
+This is the implementation guide for consolidating the current experiments into the architecture defined by [[Architecture Decisions]]. The current Focal Editor scope is described in [[Focal Editor & Focal Core]] and [[MVP]]. Keep later GUI decisions in those product documents rather than silently expanding this migration guide.
 
 The sequence below records the migration logic, not current completion status. The repository foundation, known-defect corrections, FocalCore execution and colour contracts, production scope extraction, and first editor slice are substantially implemented. The shared `focal-io` crate and canonical harness renames remain outstanding.
 
@@ -85,11 +85,11 @@ Avoid fusing modules in the reference merely for speed. An accelerated implement
 
 ## Ordered implementation sequence
 
-### Phase 0 — documentation and human GUI description
+### Phase 0 — documentation and human-directed GUI scope
 
 - Keep [[Architecture Decisions]] current.
-- The initial description exists in [[Focal-Editor Old GUI]] and authorises the first narrow slice.
-- Stop and ask the human owner before adding controls or workflows outside that description.
+- The current product and interaction documents authorise the implemented narrow slice; consequential additions still require human direction.
+- Stop and ask the human owner before adding controls or workflows outside that documented scope.
 
 ### Phase 1 — repository foundation
 
@@ -148,7 +148,7 @@ These defects are now corrected and their tests remain active regressions. New e
 
 ### Phase 7 — build the first Focal Editor vertical slice (complete)
 
-The initial GUI description is documented. Implement only its currently approved slice:
+The current approved GUI scope is documented in [[MVP]] and [[Focal Editor & Focal Core]]. Implement only its currently approved slice:
 
 1. open one decoded PNG or JPEG without import;
 2. process it through `focal-io` and FocalCore;
@@ -182,7 +182,7 @@ Do not silently settle:
 - the permanent gamut-mapping algorithm;
 - live preset references versus embedded preset snapshots;
 - source identity and sidecar relocation behaviour;
-- the Focal Editor GUI and approved OLD_EDITOR behaviours;
+- the Focal Editor GUI and future interaction changes;
 - acceptable preview approximations;
 - which experimental curve interactions, if any, return after MVP.
 

@@ -13,15 +13,13 @@ Use egui and eframe for the GUI. Keep GUI code outside image-processing and curv
 
 Shared decoding, orientation, ICC interpretation, metadata, transparency handling, and output encoding belong to the planned [[Architecture Decisions#Shared file and metadata boundary|`focal-io` boundary]]. FocalCore remains independent of file dialogs and file formats.
 
-The GUI will be heavily based on [[Folder Structure#OLD_EDITOR|the old Focal Plane editor]]. In my experience, GUI development with LLMs takes a lot of back and forth because it needs a human to verify things. I like the existing GUI with some exceptions, so its source is a useful reference and avoids rewriting too much code.
-
-This is still a rewrite. The old processing pipeline and film-photography model must not be carried over. There are no film stocks or film-specific concepts in the new editor. It has presets.
+The GUI is a new implementation. Its current product scope and interaction principles are recorded in [[FocalPlane]], [[MVP]], and [[Sliders]]. The processing architecture remains centred on FocalCore; film-stock and film-specific processing concepts are not part of the new editor.
 
 ## Initial GUI slice
 
 This vertical slice is implemented. The list below records its original scope rather than limiting subsequently approved work.
 
-The first implementation follows [[Focal-Editor Old GUI]] and is deliberately narrow:
+The first implementation was deliberately narrow:
 
 - open one PNG or JPEG directly, without an import or catalogue step;
 - show Before and After previews;
@@ -30,7 +28,7 @@ The first implementation follows [[Focal-Editor Old GUI]] and is deliberately na
 - save editable parameters as a versioned JSON sidecar;
 - export an 8-bit sRGB PNG.
 
-The initial GUI description excluded the curve control, crop controls, and the old response curve. Crop and FocalCore-backed scope analysis were subsequently approved and implemented in Phase One. The advanced curve control and old response curve remain excluded. These GUI scope decisions never permit a second processing pipeline.
+The current MVP scope excludes the advanced curve control and response-curve controls. Crop and FocalCore-backed scope analysis were subsequently approved and implemented in Phase One. These GUI scope decisions never permit a second processing pipeline.
 
 ## Standalone editor
 
@@ -107,6 +105,5 @@ Use British English where practical in code, comments, and documentation: `colou
 - [[Sliders]] — initial controls
 - [[Testing]] — CPU reference and controlled reproducibility
 - [[Engineering Principles]] — code quality and human-directed decision making
-- [[Folder Structure]] — current code locations
 - [[Architecture Decisions]] — settled architecture and colour contracts
 - [[Clean Architecture Migration]] — consolidation sequence and dependency direction

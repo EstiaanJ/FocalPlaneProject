@@ -12,14 +12,14 @@ Read these documents before making architectural or product changes:
 
 ## Non-negotiable direction
 
-- This repository is a rewrite. `OLD_EDITOR` is a GUI reference only; do not carry over its film-stock model or processing pipeline.
+- This repository is a rewrite. Keep the production processing architecture centred on FocalCore; do not introduce a separate film-stock pipeline.
 - FocalCore is the single production processing architecture.
 - FocalCurve and FocalPlot remain independent visual harnesses, but validated GUI-independent processing moves into FocalCore.
 - Shared decoding, ICC, metadata, orientation, transparency-boundary, and encoding work belongs in the planned `focal-io` library.
 - FocalCore must not depend on egui, eframe, file dialogs, or application layout.
 - Use an explicit ordered pipeline. Do not introduce a DAG or node architecture.
 - Crop was excluded from the first vertical slice and is now approved for MVP Phase One. Do not add local adjustments.
-- The human owner has now provided the initial GUI description in `docs/Focal-Editor Old GUI.md`; follow it for the first slice and do not add controls which it explicitly excludes.
+- Keep GUI scope aligned with the current product, MVP, and interaction documentation; do not make consequential product decisions silently.
 
 ## Current colour decisions
 
