@@ -12,7 +12,7 @@ Run it with:
 cargo run -p focal-editor -- path/to/photo.jpg
 ```
 
-The current prototype saves editable parameters, including crop and straightening, to a versioned JSON sidecar and exports an 8-bit sRGB PNG. PNG processing retains 16-bit source precision where present. Its decoder supplies FocalCore with explicit sRGB or canonical Adobe RGB contracts; moving that file and colour-management work into the shared `focal-io` boundary remains outstanding.
+The current prototype saves editable parameters, including crop and straightening, to a versioned JSON sidecar and exports 8-bit sRGB PNG or JPEG through one export dialog. JPEG quality is selectable, and the dialog can reuse the complete settings from the last successful export in the current session. PNG remains lossless and processing retains 16-bit source precision where present. The export worker uses the single-threaded CPU Reference pipeline. Its decoder supplies FocalCore with explicit sRGB or canonical Adobe RGB contracts; moving that file and colour-management work into the shared `focal-io` boundary remains outstanding.
 
 Phase One crop controls are now present, including a non-destructive overlay, side and rotation handles, aspect-ratio locking, and full-resolution export application. The advanced curve editor, old response curve, and library workflow remain absent. FocalCore's numerical scope analysis is integrated with FocalPlot presentation and an RYB Log/Linear display toggle; the standalone harness retains its experimental interactions.
 

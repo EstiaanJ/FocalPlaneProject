@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     image_io::{
-        self, DecodedImage, ExportRequest, ExportResult, LoadOperation, LoadRequest, LoadResult,
-        Thumbnail, ThumbnailRequest, ThumbnailResult,
+        self, DEFAULT_JPEG_QUALITY, DecodedImage, ExportFormat, ExportRequest, ExportResult,
+        LoadOperation, LoadRequest, LoadResult, Thumbnail, ThumbnailRequest, ThumbnailResult,
     },
     preview::{self, Adjustments, PreviewEvent, PreviewRequest, PreviewSampling, PreviewWorker},
     scope::{self, ScopeRequest, ScopeResult},
@@ -127,6 +127,12 @@ struct FilmStripItem {
     thumbnail_requested: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ExportSettings {
+    path: PathBuf,
+    format: ExportFormat,
+}
+
 pub struct FocalEditorApp {
     load_sender: Sender<LoadRequest>,
     load_receiver: Receiver<LoadResult>,
@@ -201,7 +207,12 @@ pub struct FocalEditorApp {
     filmstrip_height: f32,
     navigator_height: f32,
     histogram_height: f32,
-    last_export_directory: Option<PathBuf>,
+    export_dialog_open: bool,
+    export_with_last: bool,
+    export_dialog_path: Option<PathBuf>,
+    export_dialog_format: ExportFormat,
+    jpeg_quality: u8,
+    last_export: Option<ExportSettings>,
     status: String,
 }
 
@@ -288,7 +299,12 @@ impl FocalEditorApp {
             filmstrip_height: FILMSTRIP_HEIGHT,
             navigator_height: 170.0,
             histogram_height: 185.0,
-            last_export_directory: None,
+            export_dialog_open: false,
+            export_with_last: false,
+            export_dialog_path: None,
+            export_dialog_format: ExportFormat::Png,
+            jpeg_quality: DEFAULT_JPEG_QUALITY,
+            last_export: None,
             status: "Ready — open a PNG, JPEG, TIFF, or X-T5 RAF to begin".to_owned(),
         };
 
@@ -488,8 +504,11 @@ impl FocalEditorApp {
             self.export_cancellation = None;
             match result.result {
                 Ok(()) => {
-                    self.last_export_directory =
-                        result.path.parent().map(std::path::Path::to_path_buf);
+                    self.last_export = Some(ExportSettings {
+                        path: result.path.clone(),
+                        format: result.format,
+                    });
+                    self.export_dialog_open = false;
                     self.status = format!("Exported {}", result.path.display());
                 }
                 Err(error) => {
@@ -827,43 +846,28 @@ impl FocalEditorApp {
         }
     }
 
-    fn export_png(&mut self) {
+    fn open_export_dialog(&mut self) {
         if !self.can_export() {
             self.status = "Wait for the current render before exporting".to_owned();
             return;
         }
-        let (Some(source_path), Some(_)) = (self.source_path.as_ref(), self.output.as_ref()) else {
-            self.status = "Render a preview before exporting".to_owned();
-            return;
-        };
-        let default_name = format!(
-            "{}-edited.png",
-            source_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("untitled")
-        );
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
-            .set_file_name(default_name)
-            .save_file()
-        else {
-            return;
-        };
-        self.export_to_path(&path);
-    }
-
-    fn export_beside_last(&mut self) {
-        let Some(directory) = self.last_export_directory.as_ref() else {
-            return;
-        };
         let Some(source_path) = self.source_path.as_ref() else {
+            self.status = "Open an image before exporting".to_owned();
             return;
         };
-        self.export_to_path(&default_export_path(directory, source_path));
+        self.export_dialog_path = Some(default_export_path(
+            source_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+            source_path,
+        ));
+        self.export_dialog_format = ExportFormat::Png;
+        self.jpeg_quality = DEFAULT_JPEG_QUALITY;
+        self.export_with_last = false;
+        self.export_dialog_open = true;
     }
 
-    fn export_to_path(&mut self, path: &std::path::Path) {
+    fn export_to_path(&mut self, path: &std::path::Path, format: ExportFormat) {
         if !self.can_export() {
             self.status = "Wait for the current render before exporting".to_owned();
             return;
@@ -873,6 +877,7 @@ impl FocalEditorApp {
             return;
         };
         let source = (**source).clone();
+        let path = export_path_with_format(path, format);
         self.status = "Rendering full-resolution export…".to_owned();
         self.invalidate_export();
         let cancellation = CancellationToken::new();
@@ -883,7 +888,8 @@ impl FocalEditorApp {
             .export_sender
             .send(ExportRequest {
                 generation: self.latest_generation,
-                path: path.to_path_buf(),
+                path,
+                format,
                 source,
                 snapshot: preview::snapshot_with_adjustments(self.adjustments()),
                 cancellation,
@@ -893,6 +899,165 @@ impl FocalEditorApp {
             self.invalidate_export();
             self.status = "The export worker is unavailable".to_owned();
         }
+    }
+
+    fn choose_export_path(&mut self) {
+        let Some(source_path) = self.source_path.as_ref() else {
+            return;
+        };
+        let format = self.dialog_format();
+        let default_path = self.export_dialog_path.clone().unwrap_or_else(|| {
+            default_export_path(
+                source_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+                source_path,
+            )
+        });
+        let mut dialog = rfd::FileDialog::new()
+            .set_directory(
+                default_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )
+            .set_file_name(
+                default_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("edited.png"),
+            );
+        dialog = match format {
+            ExportFormat::Png => dialog.add_filter("PNG image", &["png"]),
+            ExportFormat::Jpeg { .. } => dialog.add_filter("JPEG image", &["jpg", "jpeg"]),
+        };
+        if let Some(path) = dialog.save_file() {
+            self.export_dialog_path = Some(export_path_with_format(&path, format));
+        }
+    }
+
+    fn dialog_format(&self) -> ExportFormat {
+        match self.export_dialog_format {
+            ExportFormat::Png => ExportFormat::Png,
+            ExportFormat::Jpeg { .. } => ExportFormat::jpeg(self.jpeg_quality),
+        }
+    }
+
+    fn sync_export_dialog_to_last(&mut self) {
+        if let Some(last) = self.last_export.clone() {
+            self.export_dialog_path = Some(last.path);
+            self.export_dialog_format = last.format;
+            if let ExportFormat::Jpeg { quality } = last.format {
+                self.jpeg_quality = quality;
+            }
+        }
+    }
+
+    fn submit_export_dialog(&mut self) {
+        let Some(path) = self.export_dialog_path.clone() else {
+            self.status = "Choose an export destination first".to_owned();
+            return;
+        };
+        let format = self.dialog_format();
+        self.export_to_path(&path, format);
+    }
+
+    fn show_export_dialog(&mut self, context: &egui::Context) {
+        if !self.export_dialog_open {
+            return;
+        }
+        let mut open = self.export_dialog_open;
+        egui::Window::new("Export image")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(context, |ui| {
+                let has_last = self.last_export.is_some();
+                let was_with_last = self.export_with_last;
+                ui.add_enabled_ui(has_last, |ui| {
+                    ui.checkbox(&mut self.export_with_last, "Export with last");
+                });
+                if !has_last {
+                    ui.label(
+                        egui::RichText::new("No successful export has been made this session.")
+                            .small()
+                            .weak(),
+                    );
+                } else if self.export_with_last && !was_with_last {
+                    self.sync_export_dialog_to_last();
+                }
+
+                let settings_enabled = !self.export_with_last;
+                ui.add_enabled_ui(settings_enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("File type");
+                        let previous_format = self.export_dialog_format;
+                        let selected = match self.export_dialog_format {
+                            ExportFormat::Png => "PNG",
+                            ExportFormat::Jpeg { .. } => "JPEG",
+                        };
+                        egui::ComboBox::from_id_salt("export-file-type")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.export_dialog_format,
+                                    ExportFormat::Png,
+                                    "PNG",
+                                );
+                                ui.selectable_value(
+                                    &mut self.export_dialog_format,
+                                    ExportFormat::Jpeg {
+                                        quality: self.jpeg_quality,
+                                    },
+                                    "JPEG",
+                                );
+                            });
+                        if previous_format != self.export_dialog_format
+                            && let Some(path) = self.export_dialog_path.as_mut()
+                        {
+                            path.set_extension(self.export_dialog_format.extension());
+                        }
+                    });
+                    if matches!(self.export_dialog_format, ExportFormat::Jpeg { .. }) {
+                        ui.add(
+                            egui::Slider::new(&mut self.jpeg_quality, 1..=100)
+                                .text("JPEG quality")
+                                .clamping(egui::SliderClamping::Always),
+                        );
+                    } else {
+                        ui.label("PNG remains lossless");
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(self.export_dialog_path.as_ref().map_or_else(
+                            || "No destination selected".to_owned(),
+                            |path| path.display().to_string(),
+                        ));
+                        if ui.button("Choose…").clicked() {
+                            self.choose_export_path();
+                        }
+                    });
+                });
+
+                if self.export_with_last {
+                    ui.label(
+                        egui::RichText::new("Using the previous path and file settings.")
+                            .small()
+                            .weak(),
+                    );
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.export_dialog_open = false;
+                    }
+                    if ui
+                        .add_enabled(self.can_export(), egui::Button::new("Export"))
+                        .clicked()
+                    {
+                        self.submit_export_dialog();
+                    }
+                });
+            });
+        self.export_dialog_open = open && self.export_dialog_open;
     }
 
     fn invalidate_export(&mut self) {
@@ -1021,6 +1186,7 @@ impl eframe::App for FocalEditorApp {
             egui::Layout::top_down(egui::Align::Min),
             |ui| self.show_film_strip(ui, &context),
         );
+        self.show_export_dialog(&context);
     }
 }
 
@@ -1047,20 +1213,10 @@ impl FocalEditorApp {
         }
         if left
             .add_enabled(self.can_export(), egui::Button::new("Export"))
-            .on_hover_text("Render the current preview to an 8-bit sRGB PNG")
+            .on_hover_text("Choose file type, destination, and export settings")
             .clicked()
         {
-            self.export_png();
-        }
-        if left
-            .add_enabled(
-                self.can_export() && self.last_export_directory.is_some(),
-                egui::Button::new("Export again"),
-            )
-            .on_hover_text("Export to the folder used by the previous export this session")
-            .clicked()
-        {
-            self.export_beside_last();
+            self.open_export_dialog();
         }
         left.add_space(12.0);
         if self.loupe_enabled {
@@ -3191,6 +3347,12 @@ fn default_export_path(directory: &std::path::Path, source_path: &std::path::Pat
     directory.join(format!("{stem}-edited.png"))
 }
 
+fn export_path_with_format(path: &std::path::Path, format: ExportFormat) -> PathBuf {
+    let mut path = path.to_path_buf();
+    path.set_extension(format.extension());
+    path
+}
+
 fn configure_visuals(context: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = PANEL_BACKGROUND;
@@ -4015,7 +4177,7 @@ mod tests {
     }
 
     #[test]
-    fn repeat_export_uses_the_last_directory_and_current_source_name() {
+    fn export_defaults_and_format_extensions_are_stable() {
         assert_eq!(
             default_export_path(
                 std::path::Path::new("/exports"),
@@ -4023,6 +4185,44 @@ mod tests {
             ),
             PathBuf::from("/exports/frame-edited.png")
         );
+        assert_eq!(
+            export_path_with_format(
+                std::path::Path::new("/exports/frame-edited.png"),
+                ExportFormat::jpeg(88),
+            ),
+            PathBuf::from("/exports/frame-edited.jpg")
+        );
+        assert_eq!(
+            export_path_with_format(
+                std::path::Path::new("/exports/frame-edited.jpg"),
+                ExportFormat::Png,
+            ),
+            PathBuf::from("/exports/frame-edited.png")
+        );
+    }
+
+    #[test]
+    fn export_with_last_copies_the_complete_previous_settings() {
+        let context = egui::Context::default();
+        let mut app = FocalEditorApp::new(&context);
+        let previous = ExportSettings {
+            path: PathBuf::from("/exports/previous.jpg"),
+            format: ExportFormat::jpeg(81),
+        };
+        app.last_export = Some(previous.clone());
+        app.export_dialog_path = Some(PathBuf::from("/exports/current.png"));
+        app.export_dialog_format = ExportFormat::Png;
+        app.jpeg_quality = DEFAULT_JPEG_QUALITY;
+
+        app.sync_export_dialog_to_last();
+
+        assert_eq!(
+            app.export_dialog_path,
+            Some(previous.path),
+            "the previous destination must be reused exactly"
+        );
+        assert_eq!(app.export_dialog_format, previous.format);
+        assert_eq!(app.jpeg_quality, 81);
     }
 
     #[test]

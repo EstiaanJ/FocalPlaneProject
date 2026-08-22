@@ -30,9 +30,11 @@ The first implementation was deliberately narrow:
 - expose exposure in stops and contrast from `-100` to `+100`;
 - show the input/output histogram;
 - save editable parameters as a versioned JSON sidecar;
-- export an 8-bit sRGB PNG.
+- export an 8-bit sRGB PNG or JPEG through one export dialog with a file-type selector and JPEG quality control;
 
 The current MVP scope excludes the advanced curve control and response-curve controls. Crop and FocalCore-backed scope analysis were subsequently approved and implemented in Phase One. These GUI scope decisions never permit a second processing pipeline.
+
+The export dialog can reuse the complete settings from the last successful export in the current session, including its destination path. The editor's export worker uses the single-threaded CPU Reference pipeline; the CPU Reference remains the parity oracle for future accelerated executors.
 
 ## Standalone editor
 

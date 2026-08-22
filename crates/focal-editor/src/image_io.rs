@@ -2,9 +2,12 @@
 
 use std::{
     fmt,
-    io::{self, Cursor},
+    io::{self, Cursor, Write},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
 };
 
 use focal_core::{
@@ -13,9 +16,44 @@ use focal_core::{
 };
 use image::{
     ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat,
-    codecs::{jpeg::JpegDecoder, png::PngDecoder, tiff::TiffDecoder},
+    codecs::{
+        jpeg::{JpegDecoder, JpegEncoder},
+        png::{CompressionType, FilterType, PngDecoder, PngEncoder},
+        tiff::TiffDecoder,
+    },
 };
 use moxcms::{ColorProfile, Layout, TransformOptions};
+
+pub const DEFAULT_JPEG_QUALITY: u8 = 92;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    Png,
+    Jpeg { quality: u8 },
+}
+
+impl ExportFormat {
+    #[must_use]
+    pub const fn jpeg(quality: u8) -> Self {
+        Self::Jpeg {
+            quality: if quality == 0 {
+                1
+            } else if quality > 100 {
+                100
+            } else {
+                quality
+            },
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg { .. } => "jpg",
+        }
+    }
+}
 
 /// A decoded, displayable source image owned by the editor.
 #[derive(Clone, Debug, PartialEq)]
@@ -277,6 +315,7 @@ pub struct ThumbnailResult {
 pub struct ExportRequest {
     pub generation: u64,
     pub path: PathBuf,
+    pub format: ExportFormat,
     pub source: Image,
     pub snapshot: PipelineSnapshot,
     pub cancellation: CancellationToken,
@@ -285,6 +324,7 @@ pub struct ExportRequest {
 pub struct ExportResult {
     pub generation: u64,
     pub path: PathBuf,
+    pub format: ExportFormat,
     pub result: Result<(), String>,
 }
 
@@ -297,6 +337,7 @@ pub fn spawn_exporter() -> (Sender<ExportRequest>, Receiver<ExportResult>) {
             while let Ok(request) = request_receiver.recv() {
                 let generation = request.generation;
                 let path = request.path;
+                let format = request.format;
                 let cancellation = request.cancellation;
                 let result = Pipeline::from_snapshot(request.snapshot)
                     .render_with_context(
@@ -312,13 +353,14 @@ pub fn spawn_exporter() -> (Sender<ExportRequest>, Receiver<ExportResult>) {
                         if cancellation.is_cancelled() {
                             Err("export cancelled".to_owned())
                         } else {
-                            encode_srgb_png(&path, &output)
+                            encode_export(&path, &output, format, &cancellation)
                         }
                     });
                 if result_sender
                     .send(ExportResult {
                         generation,
                         path,
+                        format,
                         result,
                     })
                     .is_err()
@@ -331,9 +373,70 @@ pub fn spawn_exporter() -> (Sender<ExportRequest>, Receiver<ExportResult>) {
     (request_sender, result_receiver)
 }
 
+fn encode_export(
+    path: &Path,
+    output_image: &Image,
+    format: ExportFormat,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    ensure_export_not_cancelled(cancellation)?;
+    let rgb = rgb_bytes(output_image, cancellation)?;
+    let temporary_path = temporary_export_path(path);
+    let file = match std::fs::File::create(&temporary_path) {
+        Ok(file) => file,
+        Err(error) => return Err(error.to_string()),
+    };
+    let writer = CancellableWriter::new(
+        std::io::BufWriter::with_capacity(1 << 20, file),
+        cancellation.clone(),
+    );
+    let result = match format {
+        ExportFormat::Png => encode_srgb_png_with_writer(output_image, &rgb, writer),
+        ExportFormat::Jpeg { quality } => {
+            encode_srgb_jpeg_with_writer(output_image, &rgb, quality.clamp(1, 100), writer)
+        }
+    };
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    if cancellation.is_cancelled() {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err("export cancelled".to_owned());
+    }
+    std::fs::rename(&temporary_path, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary_path);
+        error.to_string()
+    })
+}
+
+fn temporary_export_path(path: &Path) -> PathBuf {
+    static NEXT_EXPORT_ID: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT_EXPORT_ID.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("export");
+    path.with_file_name(format!(".{name}.focal-part-{}-{id}", std::process::id()))
+}
+
+#[cfg(test)]
 fn encode_srgb_png(path: &Path, output_image: &Image) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
-    let mut encoder = image::codecs::png::PngEncoder::new(std::io::BufWriter::new(file));
+    encode_export(
+        path,
+        output_image,
+        ExportFormat::Png,
+        &CancellationToken::new(),
+    )
+}
+
+fn encode_srgb_png_with_writer<W: Write>(
+    output_image: &Image,
+    rgb: &[u8],
+    writer: CancellableWriter<W>,
+) -> Result<(), String> {
+    let cancellation = writer.cancellation.clone();
+    let mut encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
     encoder
         .set_icc_profile(
             ColorProfile::new_srgb()
@@ -341,25 +444,102 @@ fn encode_srgb_png(path: &Path, output_image: &Image) -> Result<(), String> {
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
-    let rgba = output_image
-        .pixels()
-        .iter()
-        .flat_map(|pixel| {
-            pixel
-                .iter()
-                .copied()
-                .map(to_byte)
-                .chain(std::iter::once(u8::MAX))
-        })
-        .collect::<Vec<_>>();
     encoder
         .write_image(
-            &rgba,
+            rgb,
             output_image.width(),
             output_image.height(),
-            ExtendedColorType::Rgba8,
+            ExtendedColorType::Rgb8,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| encode_error(&error, &cancellation))
+}
+
+fn encode_srgb_jpeg_with_writer<W: Write>(
+    output_image: &Image,
+    rgb: &[u8],
+    quality: u8,
+    writer: CancellableWriter<W>,
+) -> Result<(), String> {
+    let cancellation = writer.cancellation.clone();
+    let mut encoder = JpegEncoder::new_with_quality(writer, quality);
+    encoder
+        .set_icc_profile(
+            ColorProfile::new_srgb()
+                .encode()
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    encoder
+        .write_image(
+            rgb,
+            output_image.width(),
+            output_image.height(),
+            ExtendedColorType::Rgb8,
+        )
+        .map_err(|error| encode_error(&error, &cancellation))
+}
+
+fn rgb_bytes(image: &Image, cancellation: &CancellationToken) -> Result<Vec<u8>, String> {
+    let mut rgb = Vec::with_capacity(image.pixels().len().saturating_mul(3));
+    for chunk in image.pixels().chunks(16_384) {
+        ensure_export_not_cancelled(cancellation)?;
+        for pixel in chunk {
+            rgb.extend(pixel.iter().copied().map(to_byte));
+        }
+    }
+    Ok(rgb)
+}
+
+fn ensure_export_not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
+    if cancellation.is_cancelled() {
+        Err("export cancelled".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn encode_error(error: &image::ImageError, cancellation: &CancellationToken) -> String {
+    if cancellation.is_cancelled() {
+        "export cancelled".to_owned()
+    } else {
+        error.to_string()
+    }
+}
+
+struct CancellableWriter<W> {
+    inner: W,
+    cancellation: CancellationToken,
+}
+
+impl<W> CancellableWriter<W> {
+    fn new(inner: W, cancellation: CancellationToken) -> Self {
+        Self {
+            inner,
+            cancellation,
+        }
+    }
+}
+
+impl<W: Write> Write for CancellableWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.cancellation.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "export cancelled",
+            ));
+        }
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.cancellation.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "export cancelled",
+            ));
+        }
+        self.inner.flush()
+    }
 }
 
 /// Starts the image decoder away from the egui thread.
@@ -1023,6 +1203,97 @@ mod tests {
         let mut decoder = PngDecoder::new(Cursor::new(bytes)).unwrap();
         let profile = decoder.icc_profile().unwrap().unwrap();
         assert!(ColorProfile::new_from_slice(&profile).is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn export_format_clamps_jpeg_quality() {
+        assert_eq!(ExportFormat::jpeg(0), ExportFormat::Jpeg { quality: 1 });
+        assert_eq!(ExportFormat::jpeg(85), ExportFormat::Jpeg { quality: 85 });
+        assert_eq!(
+            ExportFormat::jpeg(u8::MAX),
+            ExportFormat::Jpeg { quality: 100 }
+        );
+    }
+
+    #[test]
+    fn jpeg_export_embeds_srgb_profile_and_preserves_dimensions() {
+        let path =
+            std::env::temp_dir().join(format!("focal-editor-export-{}.jpg", std::process::id()));
+        let source = Image::new(
+            2,
+            1,
+            vec![[0.1, 0.2, 0.3], [0.8, 0.7, 0.6]],
+            ImageContract::SRGB_DISPLAY,
+        )
+        .unwrap();
+        encode_export(
+            &path,
+            &source,
+            ExportFormat::jpeg(90),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut decoder = JpegDecoder::new(Cursor::new(&bytes)).unwrap();
+        assert!(decoder.icc_profile().unwrap().is_some());
+        assert_eq!(decoder.dimensions(), (2, 1));
+        let decoded_image = image::load_from_memory_with_format(&bytes, ImageFormat::Jpeg).unwrap();
+        assert_eq!((decoded_image.width(), decoded_image.height()), (2, 1));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn jpeg_quality_changes_the_encoded_stream() {
+        let low_path =
+            std::env::temp_dir().join(format!("focal-editor-jpeg-low-{}.jpg", std::process::id()));
+        let high_path =
+            std::env::temp_dir().join(format!("focal-editor-jpeg-high-{}.jpg", std::process::id()));
+        let source = Image::new(
+            32,
+            32,
+            (0..1_024)
+                .map(|index| {
+                    let value = index as f32 / 1_023.0;
+                    [value, 1.0 - value, (value * 0.37).sin().abs()]
+                })
+                .collect(),
+            ImageContract::SRGB_DISPLAY,
+        )
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        encode_export(&low_path, &source, ExportFormat::jpeg(10), &cancellation).unwrap();
+        encode_export(&high_path, &source, ExportFormat::jpeg(95), &cancellation).unwrap();
+        assert_ne!(
+            std::fs::read(&low_path).unwrap(),
+            std::fs::read(&high_path).unwrap()
+        );
+        std::fs::remove_file(low_path).unwrap();
+        std::fs::remove_file(high_path).unwrap();
+    }
+
+    #[test]
+    fn png_export_uses_opaque_rgb_pixels() {
+        let path = std::env::temp_dir().join(format!(
+            "focal-editor-rgb-export-{}.png",
+            std::process::id()
+        ));
+        let source = Image::new(
+            2,
+            1,
+            vec![[0.0, 0.5, 1.0], [1.0, 0.25, 0.0]],
+            ImageContract::SRGB_DISPLAY,
+        )
+        .unwrap();
+        encode_export(&path, &source, ExportFormat::Png, &CancellationToken::new()).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let decoder = image::codecs::png::PngDecoder::new(Cursor::new(&bytes)).unwrap();
+        assert_eq!(decoder.color_type(), image::ColorType::Rgb8);
+        let decoded_image = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(decoded_image.as_raw(), &[0, 128, 255, 255, 64, 0]);
         std::fs::remove_file(path).unwrap();
     }
 
