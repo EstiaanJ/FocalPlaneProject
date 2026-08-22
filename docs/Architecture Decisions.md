@@ -87,7 +87,9 @@ The current CPU reference performs the Adobe RGB-to-sRGB matrix conversion and t
 
 The proper camera-RAW implementation will use a wide-gamut, scene-referred working domain. That is the only acceptable long-term direction.
 
-For Fujifilm X-T5 RAW files, the no-edit default will be an opinionated rendering calibrated towards the camera's Provia/Standard JPEG. This is a relative camera-rendering target, not a claim of colourimetric calibration. The supplied paired RAW and JPEG may guide initial research, but production behaviour must be validated across held-out regions, exposures, subjects, and lighting. RAW implementation is currently paused, and no decoder or camera-specific rendering path is integrated.
+For Fujifilm X-T5 RAW files, the no-edit default will be an opinionated **Camera-Neutral** rendering calibrated towards the camera-produced Standard JPEG. Camera-Neutral names FocalPlane's baseline rendering; it is not a Fujifilm film-simulation mode and must not be called Provia in the product. The current fixture filenames and camera metadata retain `PROVIA` because they identify how those source files were captured.
+
+This is a relative camera-rendering target, not a claim of colourimetric calibration or of recovering the physical paint colours. The paired X-T5 RAW and JPEG, its annotated rectangles, and its isolated region crops provide the first fitting and validation fixture. Camera-Neutral v3 is integrated so X-T5 RAF files can open in the editor. It explicitly interpolates the camera's 6×6 X-Trans CFA before colour and tone fitting; the discarded v1 incorrectly sent X-Trans data through Rawler's Bayer-oriented PPG path and produced a visible green grid. V3 remains an initial, explicitly versioned rendering with documented residual colour, tone, noise, and performance differences. Production behaviour must still be validated across held-out regions, exposures, subjects, and lighting before the baseline is considered mature.
 
 The default rendering for other RAW cameras, and the boundary between a camera-specific baseline and explicit creative edits, remain human-owned decisions.
 

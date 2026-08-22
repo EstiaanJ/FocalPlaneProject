@@ -289,7 +289,7 @@ impl FocalEditorApp {
             navigator_height: 170.0,
             histogram_height: 185.0,
             last_export_directory: None,
-            status: "Ready — open a PNG, JPEG, or TIFF to begin".to_owned(),
+            status: "Ready — open a PNG, JPEG, TIFF, or X-T5 RAF to begin".to_owned(),
         };
 
         if let Some(path) = std::env::args_os()
@@ -364,7 +364,8 @@ impl FocalEditorApp {
 
     fn open_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "tif", "tiff"])
+            .add_filter("Fujifilm RAF", &["raf", "RAF"])
+            .add_filter("Rendered images", &["png", "jpg", "jpeg", "tif", "tiff"])
             .pick_file()
         {
             self.open_path(path);
@@ -2434,7 +2435,7 @@ fn is_supported_image_path(path: &std::path::Path) -> bool {
         .is_some_and(|extension| {
             matches!(
                 extension.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "tif" | "tiff"
+                "png" | "jpg" | "jpeg" | "tif" | "tiff" | "raf"
             )
         })
 }
@@ -3648,7 +3649,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("focal-editor-siblings-{}", std::process::id()));
         std::fs::create_dir_all(directory.join("nested.jpg")).unwrap();
-        for name in ["a.PNG", "b.jpg", "c.JPEG", "d.tiff", "ignore.txt"] {
+        for name in ["a.PNG", "b.jpg", "c.JPEG", "d.tiff", "e.RAF", "ignore.txt"] {
             std::fs::write(directory.join(name), []).unwrap();
         }
         let mut found = discover_sibling_images(&directory.join("a.PNG"))
@@ -3658,7 +3659,7 @@ mod tests {
         found.sort();
         assert_eq!(
             found,
-            ["a.PNG", "b.jpg", "c.JPEG", "d.tiff"]
+            ["a.PNG", "b.jpg", "c.JPEG", "d.tiff", "e.RAF"]
                 .into_iter()
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()

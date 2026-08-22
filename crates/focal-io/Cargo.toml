@@ -1,0 +1,19 @@
+[package]
+name = "focal-io"
+version.workspace = true
+edition.workspace = true
+description = "Shared image file and metadata boundary for FocalPlane"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+focal-core.workspace = true
+image.workspace = true
+rawler.workspace = true
+rayon.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

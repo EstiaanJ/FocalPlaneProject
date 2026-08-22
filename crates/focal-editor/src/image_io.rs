@@ -78,12 +78,41 @@ fn decode_with_cancellation(
     path: &Path,
     cancellation: &CancellationToken,
 ) -> Result<DecodedImage, ImageIoError> {
+    if is_raf_path(path) {
+        let rendered = focal_io::decode_xt5_camera_neutral(path, cancellation)
+            .map_err(|error| ImageIoError::Raw(error.to_string()))?;
+        return Ok(DecodedImage {
+            width: rendered.width,
+            height: rendered.height,
+            rgba: rendered.rgba,
+            pixels: rendered.pixels,
+            alpha: vec![
+                1.0;
+                usize::try_from(rendered.width)
+                    .ok()
+                    .and_then(|width| usize::try_from(rendered.height)
+                        .ok()
+                        .and_then(|height| width.checked_mul(height)))
+                    .ok_or_else(|| ImageIoError::Raw(
+                        "RAW dimensions overflow addressable memory".to_owned()
+                    ))?
+            ],
+            input_contract: ImageContract::SRGB_DISPLAY,
+            has_transparency: false,
+        });
+    }
     let bytes = std::fs::read(path).map_err(|source| ImageIoError::Open {
         path: path.to_path_buf(),
         source,
     })?;
     ensure_not_cancelled(cancellation)?;
     decode_bytes_with_cancellation(&bytes, cancellation)
+}
+
+fn is_raf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("raf"))
 }
 
 #[cfg(test)]
@@ -416,6 +445,15 @@ fn decode_thumbnail_with_cancellation(
     maximum_dimension: u32,
     cancellation: &CancellationToken,
 ) -> Result<Thumbnail, ImageIoError> {
+    if is_raf_path(path) {
+        let image = focal_io::decode_xt5_thumbnail(path, maximum_dimension, cancellation)
+            .map_err(|error| ImageIoError::Raw(error.to_string()))?;
+        return Ok(Thumbnail {
+            width: image.width,
+            height: image.height,
+            rgba: image.rgba,
+        });
+    }
     let bytes = std::fs::read(path).map_err(|source| ImageIoError::Open {
         path: path.to_path_buf(),
         source,
@@ -592,6 +630,7 @@ pub enum ImageIoError {
     Decode(image::ImageError),
     Cancelled,
     UnsupportedFormat,
+    Raw(String),
     ColourProfile(String),
 }
 
@@ -604,8 +643,12 @@ impl fmt::Display for ImageIoError {
             Self::Decode(source) => write!(formatter, "could not decode image: {source}"),
             Self::Cancelled => formatter.write_str("image operation cancelled"),
             Self::UnsupportedFormat => {
-                write!(formatter, "only PNG, JPEG, and TIFF images are supported")
+                write!(
+                    formatter,
+                    "only PNG, JPEG, TIFF, and Fujifilm X-T5 RAF images are supported"
+                )
             }
+            Self::Raw(source) => write!(formatter, "could not develop RAW image: {source}"),
             Self::ColourProfile(source) => {
                 write!(
                     formatter,
@@ -621,6 +664,32 @@ impl std::error::Error for ImageIoError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raf_extension_detection_is_case_insensitive() {
+        assert!(is_raf_path(Path::new("capture.RAF")));
+        assert!(is_raf_path(Path::new("capture.raf")));
+        assert!(!is_raf_path(Path::new("capture.jpg")));
+    }
+
+    #[test]
+    #[ignore = "uses the local 38 MP X-T5 reference fixture"]
+    fn xt5_raf_opens_through_the_editor_decode_boundary() {
+        let path = Path::new("../../test-image/X-T5_RAW/PROVIA_JPG.RAF");
+        let image = decode_with_cancellation(path, &CancellationToken::new()).unwrap();
+        assert_eq!((image.width, image.height), (7728, 5152));
+        assert_eq!(image.input_contract, ImageContract::SRGB_DISPLAY);
+        assert!(!image.has_transparency);
+        assert_eq!(image.pixels.len(), 7728 * 5152);
+        assert_eq!(image.rgba.len(), 7728 * 5152 * 4);
+        let thumbnail = decode_thumbnail_with_cancellation(path, 160, &CancellationToken::new())
+            .expect("the embedded RAF preview should provide a thumbnail");
+        assert!(thumbnail.width <= 160 && thumbnail.height <= 160);
+        assert_eq!(
+            thumbnail.rgba.len(),
+            usize::try_from(thumbnail.width * thumbnail.height * 4).unwrap()
+        );
+    }
 
     #[test]
     fn transparent_pixel_is_flattened_in_linear_light() {
