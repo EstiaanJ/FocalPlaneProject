@@ -24,7 +24,7 @@ use image::{
 };
 use moxcms::{ColorProfile, Layout, TransformOptions};
 
-pub const DEFAULT_JPEG_QUALITY: u8 = 92;
+pub const DEFAULT_JPEG_QUALITY: u8 = 96;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {

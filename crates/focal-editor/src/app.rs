@@ -39,9 +39,15 @@ const EDIT_STATE_VERSION: u32 = 3;
 const PREVIEW_BACKGROUND: Color32 = Color32::from_rgb(12, 13, 15);
 const PANEL_BACKGROUND: Color32 = Color32::from_rgb(24, 26, 29);
 const ACCENT: Color32 = Color32::from_rgb(117, 181, 230);
-const LEFT_RAIL_WIDTH: f32 = 190.0;
-const RIGHT_RAIL_WIDTH: f32 = 330.0;
-const FILMSTRIP_HEIGHT: f32 = 132.0;
+const LEFT_RAIL_WIDTH: f32 = 228.0;
+const RIGHT_RAIL_WIDTH: f32 = 280.0;
+const FILMSTRIP_ITEM_HEIGHT: f32 = 78.0;
+const FILMSTRIP_BOTTOM_INSET: f32 = 2.0;
+// The header row is one body-text line plus egui's default row spacing. Keep
+// the default filmstrip just tall enough for that row, the thumbnails, and
+// the fixed bottom inset.
+const FILMSTRIP_HEIGHT: f32 = 102.0;
+const FILMSTRIP_MIN_HEIGHT: f32 = FILMSTRIP_HEIGHT;
 const TOOLBAR_HEIGHT: f32 = 38.0;
 const PROCESSING_BAR_HEIGHT: f32 = 32.0;
 const PREVIEW_MAX_PIXELS: usize = 1_000_000;
@@ -205,8 +211,6 @@ pub struct FocalEditorApp {
     left_rail_width: f32,
     right_rail_width: f32,
     filmstrip_height: f32,
-    navigator_height: f32,
-    histogram_height: f32,
     export_dialog_open: bool,
     export_with_last: bool,
     export_dialog_path: Option<PathBuf>,
@@ -297,8 +301,6 @@ impl FocalEditorApp {
             left_rail_width: LEFT_RAIL_WIDTH,
             right_rail_width: RIGHT_RAIL_WIDTH,
             filmstrip_height: FILMSTRIP_HEIGHT,
-            navigator_height: 170.0,
-            histogram_height: 185.0,
             export_dialog_open: false,
             export_with_last: false,
             export_dialog_path: None,
@@ -1123,9 +1125,10 @@ impl eframe::App for FocalEditorApp {
         let mut toolbar_ui = ui.new_child(egui::UiBuilder::new().max_rect(toolbar_rect));
         toolbar_ui.set_clip_rect(toolbar_rect);
         self.show_toolbar(&mut toolbar_ui, toolbar_rect);
-        let filmstrip_height = self
-            .filmstrip_height
-            .clamp(90.0, (ui.available_height() - 160.0).max(90.0));
+        let filmstrip_height = self.filmstrip_height.clamp(
+            FILMSTRIP_MIN_HEIGHT,
+            (ui.available_height() - 160.0).max(FILMSTRIP_MIN_HEIGHT),
+        );
         let content_height =
             (ui.available_height() - filmstrip_height - RESIZER_THICKNESS).max(100.0);
         let picked_white_balance = ui
@@ -1139,7 +1142,7 @@ impl eframe::App for FocalEditorApp {
                     ui.allocate_ui_with_layout(
                         Vec2::new(controls_width, ui.available_height()),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.show_left_panel(ui, &context),
+                        |ui| self.show_scope_panel(ui, &context),
                     );
                     let left_handle = resize_handle(ui, ResizeDirection::Horizontal);
                     if left_handle.dragged() {
@@ -1178,8 +1181,8 @@ impl eframe::App for FocalEditorApp {
         }
         let filmstrip_handle = resize_handle(ui, ResizeDirection::Vertical);
         if filmstrip_handle.dragged() {
-            self.filmstrip_height =
-                (self.filmstrip_height - filmstrip_handle.drag_delta().y).clamp(90.0, 300.0);
+            self.filmstrip_height = (self.filmstrip_height - filmstrip_handle.drag_delta().y)
+                .clamp(FILMSTRIP_MIN_HEIGHT, 300.0);
         }
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), filmstrip_height),
@@ -1245,57 +1248,28 @@ impl FocalEditorApp {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         right.set_clip_rect(right_rect);
+        // Keep one character-sized breathing space between the title and the
+        // application edge while retaining the right-aligned status text.
+        right.add_space(8.0);
         right.label(egui::RichText::new("FOCALPLANE").strong());
         right.add_space(12.0);
         right.label(egui::RichText::new(&self.status).small().weak());
     }
 
-    fn show_left_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        let navigator_height = self
-            .navigator_height
-            .clamp(90.0, (ui.available_height() - 120.0).max(90.0));
-        let (rect, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), navigator_height),
+    fn show_scope_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        let available_height = ui.available_height();
+        let scope_height = (available_height - 120.0)
+            .clamp(180.0, 520.0)
+            .min(available_height);
+        ui.heading("Scopes");
+        let (scope_rect, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), scope_height.max(0.0)),
             Sense::hover(),
         );
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, CornerRadius::same(4), PREVIEW_BACKGROUND);
-        if let Some(texture) = &self.source_texture {
-            let image_rect = fit_rect(
-                rect.shrink(5.0),
-                texture.size_vec2().x / texture.size_vec2().y,
-            );
-            painter.image(
-                texture.id(),
-                image_rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        } else {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "No photo",
-                egui::FontId::proportional(12.0),
-                Color32::from_gray(140),
-            );
-        }
-        painter.rect_stroke(
-            rect,
-            CornerRadius::same(4),
-            Stroke::new(1.0, Color32::from_gray(62)),
-            StrokeKind::Inside,
-        );
-        ui.label(
-            egui::RichText::new("Zoom controls will be added later")
-                .small()
-                .weak(),
-        );
-        let navigator_handle = resize_handle(ui, ResizeDirection::Vertical);
-        if navigator_handle.dragged() {
-            self.navigator_height =
-                (self.navigator_height + navigator_handle.drag_delta().y).clamp(90.0, 420.0);
-        }
+        ui.scope_builder(egui::UiBuilder::new().max_rect(scope_rect), |ui| {
+            self.show_scopes(ui, context);
+        });
+        ui.separator();
         ui.heading("Presets");
         ui.add_space(4.0);
         if ui.selectable_label(true, "Digital Neutral").clicked() {
@@ -1318,8 +1292,8 @@ impl FocalEditorApp {
         );
     }
 
-    fn show_right_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.horizontal(|ui| {
+    fn show_scopes(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Histogram, "Histograms");
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Cie1931, "CIE 1931");
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Ryb, "RYB");
@@ -1365,27 +1339,17 @@ impl FocalEditorApp {
             .weak(),
         );
         let available = ui.available_size();
-        let processing_height = available.y.min(PROCESSING_BAR_HEIGHT);
-        let scope_controls_height = (available.y - processing_height).max(0.0);
-        let (histogram_height, controls_height) = split_panel_heights(
-            scope_controls_height,
-            self.histogram_height,
-            80.0,
-            120.0,
-            RESIZER_THICKNESS,
-        );
-        self.histogram_height = histogram_height;
-        let (histogram_rect, _) =
-            ui.allocate_exact_size(Vec2::new(available.x, histogram_height), Sense::hover());
+        let (scope_rect, _) =
+            ui.allocate_exact_size(Vec2::new(available.x, available.y), Sense::hover());
         ui.scope_builder(
-            egui::UiBuilder::new().max_rect(histogram_rect),
+            egui::UiBuilder::new().max_rect(scope_rect),
             |ui| match self.scope_tab {
                 ScopeTab::Histogram => {
                     draw_histogram_pair(
                         ui,
                         self.source_histogram.as_ref(),
                         self.output_histogram.as_ref(),
-                        histogram_height,
+                        available.y,
                         self.histogram_density_scale,
                     );
                 }
@@ -1397,12 +1361,16 @@ impl FocalEditorApp {
                 }
             },
         );
-        let histogram_handle = resize_handle(ui, ResizeDirection::Vertical);
-        if histogram_handle.dragged() {
-            self.histogram_height += histogram_handle.drag_delta().y;
-        }
-        let (controls_rect, _) =
-            ui.allocate_exact_size(Vec2::new(available.x, controls_height), Sense::hover());
+    }
+
+    fn show_right_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        let available = ui.available_size();
+        let processing_height = available.y.min(PROCESSING_BAR_HEIGHT);
+        let controls_height = (available.y - processing_height).max(0.0);
+        let (controls_rect, _) = ui.allocate_exact_size(
+            Vec2::new(available.x.max(0.0), controls_height),
+            Sense::hover(),
+        );
         ui.scope_builder(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("focal-editor-controls")
@@ -1421,7 +1389,6 @@ impl FocalEditorApp {
 
     #[allow(clippy::too_many_lines)]
     fn show_crop_controls(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.label(egui::RichText::new("Crop and straighten").strong());
         ui.horizontal(|ui| {
             let label = match self.crop_mode {
                 CropMode::Inactive => "Crop",
@@ -1558,67 +1525,83 @@ impl FocalEditorApp {
         });
         ui.label(egui::RichText::new(input_label).small().weak());
         ui.add_space(8.0);
-        self.show_crop_controls(ui, context);
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Display aids").strong());
+        egui::CollapsingHeader::new("Crop and straighten")
+            .default_open(true)
+            .show(ui, |ui| self.show_crop_controls(ui, context));
+
         let mut clipping_changed = false;
-        clipping_changed |= ui
-            .checkbox(&mut self.show_highlight_clipping, "Highlight clipping")
-            .on_hover_text("Mark pixels with one or more channels at the display maximum")
-            .changed();
-        clipping_changed |= ui
-            .checkbox(&mut self.show_lowlight_clipping, "Lowlight clipping")
-            .on_hover_text("Mark pixels whose display lightness reaches black")
-            .changed();
+        egui::CollapsingHeader::new("Display Aids")
+            .default_open(true)
+            .show(ui, |ui| {
+                clipping_changed |= ui
+                    .checkbox(&mut self.show_highlight_clipping, "Highlight clipping")
+                    .on_hover_text("Mark pixels with one or more channels at the display maximum")
+                    .changed();
+                clipping_changed |= ui
+                    .checkbox(&mut self.show_lowlight_clipping, "Lowlight clipping")
+                    .on_hover_text("Mark pixels whose display lightness reaches black")
+                    .changed();
+            });
         if clipping_changed && let Some(generation) = self.output_generation {
             self.rebuild_output_texture(context, generation);
         }
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("White balance").strong());
-        if white_balance_picker_button(ui, self.white_balance_picker)
-            .on_hover_text("Sample white balance from a neutral area of the photo")
-            .clicked()
-        {
-            self.white_balance_picker = !self.white_balance_picker;
-        }
-        let warmth_changed = parameter_row(
-            ui,
-            "Warmth",
-            &mut self.warmth,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "Decoded-image blue-to-amber balance; not a Kelvin temperature",
-        );
-        let tint_changed = parameter_row(
-            ui,
-            "Tint",
-            &mut self.tint,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "Decoded-image green-to-magenta balance",
-        );
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Tone").strong());
-        let exposure_changed = parameter_row(
-            ui,
-            "Exposure",
-            &mut self.exposure_stops,
-            -8.0..=8.0,
-            0.0,
-            0.01,
-            "Stops of exposure compensation",
-        );
-        let contrast_changed = parameter_row(
-            ui,
-            "Contrast",
-            &mut self.contrast,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "Temporary FocalCore contrast control",
-        );
+
+        let mut warmth_changed = false;
+        let mut tint_changed = false;
+        egui::CollapsingHeader::new("White Balance")
+            .default_open(true)
+            .show(ui, |ui| {
+                if white_balance_picker_button(ui, self.white_balance_picker)
+                    .on_hover_text("Sample white balance from a neutral area of the photo")
+                    .clicked()
+                {
+                    self.white_balance_picker = !self.white_balance_picker;
+                }
+                warmth_changed = parameter_row(
+                    ui,
+                    "Warmth",
+                    &mut self.warmth,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Decoded-image blue-to-amber balance; not a Kelvin temperature",
+                );
+                tint_changed = parameter_row(
+                    ui,
+                    "Tint",
+                    &mut self.tint,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Decoded-image green-to-magenta balance",
+                );
+            });
+
+        let mut exposure_changed = false;
+        let mut contrast_changed = false;
+        egui::CollapsingHeader::new("Tone")
+            .default_open(true)
+            .show(ui, |ui| {
+                exposure_changed = parameter_row(
+                    ui,
+                    "Exposure",
+                    &mut self.exposure_stops,
+                    -8.0..=8.0,
+                    0.0,
+                    0.01,
+                    "Stops of exposure compensation",
+                );
+                contrast_changed = parameter_row(
+                    ui,
+                    "Contrast",
+                    &mut self.contrast,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Temporary FocalCore contrast control",
+                );
+            });
+
         let mut local_contrast_changed = false;
         let mut local_radius_changed = false;
         egui::CollapsingHeader::new("Local Contrast")
@@ -1643,35 +1626,46 @@ impl FocalEditorApp {
                     "Lightness-detail radius in preview pixels",
                 );
             });
-        let saturation_changed = parameter_row(
-            ui,
-            "Saturation",
-            &mut self.saturation,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "HSV saturation with highlight and highly saturated colour protection",
-        );
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Noise reduction").strong());
-        let noise_luminance_changed = parameter_row(
-            ui,
-            "Luminance",
-            &mut self.noise_luminance,
-            0.0..=100.0,
-            0.0,
-            0.1,
-            "Edge-aware smoothing of decoded-image brightness noise",
-        );
-        let noise_colour_changed = parameter_row(
-            ui,
-            "Colour",
-            &mut self.noise_colour,
-            0.0..=100.0,
-            0.0,
-            0.1,
-            "Edge-aware smoothing of decoded-image colour noise",
-        );
+
+        let mut saturation_changed = false;
+        egui::CollapsingHeader::new("Colour")
+            .default_open(true)
+            .show(ui, |ui| {
+                saturation_changed = parameter_row(
+                    ui,
+                    "Saturation",
+                    &mut self.saturation,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "HSV saturation with highlight and highly saturated colour protection",
+                );
+            });
+
+        let mut noise_luminance_changed = false;
+        let mut noise_colour_changed = false;
+        egui::CollapsingHeader::new("Noise Reduction")
+            .default_open(true)
+            .show(ui, |ui| {
+                noise_luminance_changed = parameter_row(
+                    ui,
+                    "Luminance",
+                    &mut self.noise_luminance,
+                    0.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Edge-aware smoothing of decoded-image brightness noise",
+                );
+                noise_colour_changed = parameter_row(
+                    ui,
+                    "Colour",
+                    &mut self.noise_colour,
+                    0.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Edge-aware smoothing of decoded-image colour noise",
+                );
+            });
         if warmth_changed
             || tint_changed
             || exposure_changed
@@ -1698,9 +1692,11 @@ impl FocalEditorApp {
         let has_image = self.source.is_some();
         let has_copied_edits = self.copied_edits.is_some();
         let mut visible_indices = Vec::new();
+        let scroll_height = (ui.available_height() - FILMSTRIP_BOTTOM_INSET).max(0.0);
         egui::ScrollArea::horizontal()
             .id_salt("focal-editor-film-strip")
             .auto_shrink([false, false])
+            .max_height(scroll_height)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for index in 0..self.film_strip.len() {
@@ -2406,6 +2402,7 @@ fn draw_scope(ui: &mut egui::Ui, texture: Option<&TextureHandle>, space: ScopeSp
     }
 }
 
+#[cfg(test)]
 fn split_panel_heights(
     available: f32,
     desired_top: f32,
@@ -2430,10 +2427,13 @@ fn show_processing_bar(
     exporting: bool,
     progress: f32,
 ) {
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), height.max(0.0)),
-        Sense::hover(),
-    );
+    // A child UI can report its unconstrained layout width even when the
+    // parent is clipped. Intersect the allocation with the visible clip rect
+    // before placing the bar so its right edge cannot escape the application.
+    let available = ui.available_rect_before_wrap();
+    let right = available.right().min(ui.clip_rect().right());
+    let width = (right - available.left()).max(0.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height.max(0.0)), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::ZERO, PANEL_BACKGROUND);
     if height < 1.0 {
@@ -2441,15 +2441,19 @@ fn show_processing_bar(
     }
     let (fraction, label) = processing_bar_state(loading, rendering, exporting, progress);
     let colour = processing_bar_colour(loading, rendering || exporting);
-    let bar_rect = rect.shrink2(Vec2::new(8.0, 10.0));
+    let bar_rect = Rect::from_min_size(
+        rect.min + Vec2::new(8.0, 10.0),
+        Vec2::new(
+            (rect.width() - 16.0).max(0.0),
+            (rect.height() - 20.0).max(0.0),
+        ),
+    );
     let bar = egui::ProgressBar::new(fraction)
         .desired_width(bar_rect.width())
         .fill(colour)
         .text(label)
         .animate(fraction < 1.0);
-    ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
-        ui.add(bar);
-    });
+    ui.put(bar_rect, bar);
 }
 
 fn processing_bar_state(
@@ -2532,7 +2536,7 @@ const fn background_work_needs_repaint(
 }
 
 fn film_strip_item(ui: &mut egui::Ui, item: &FilmStripItem, selected: bool) -> egui::Response {
-    let desired_size = Vec2::new(112.0, 78.0);
+    let desired_size = Vec2::new(112.0, FILMSTRIP_ITEM_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
     let stroke = if selected {
         Stroke::new(2.0, ACCENT)

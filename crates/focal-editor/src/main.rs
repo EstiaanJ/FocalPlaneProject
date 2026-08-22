@@ -12,6 +12,7 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("FocalPlane — Focal Editor")
             .with_inner_size([1_400.0, 860.0])
+            .with_maximized(true)
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };

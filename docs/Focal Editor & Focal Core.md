@@ -36,6 +36,8 @@ The current MVP scope excludes the advanced curve control and response-curve con
 
 The export dialog can reuse the complete settings from the last successful export in the current session, including its destination path. The editor's export worker uses the single-threaded CPU Reference pipeline; the CPU Reference remains the parity oracle for future accelerated executors.
 
+The current layout places Histograms, CIE 1931, and RYB scopes in the left rail, with presets below them. The Navigator has been removed. The right rail contains foldable Crop, Display Aids, White Balance, Tone, Local Contrast, Colour, and Noise Reduction sections above the fixed processing bar.
+
 ## Standalone editor
 
 Focal Editor must be usable without FocalLib. Opening one photograph must never require importing it, creating a catalogue, or adopting the photo-management workflow.
