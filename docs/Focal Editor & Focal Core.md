@@ -83,7 +83,7 @@ Floating point is not permission to erase semantics: each image must identify it
 
 The binding decoded-image and future RAW colour contracts live in [[Architecture Decisions#Colour pipeline for the MVP]] and [[Architecture Decisions#Colour pipeline for the proper implementation]].
 
-Fujifilm X-T5 support may be a first-class advantage even if this makes the software less generic. Matching Fujifilm's built-in JPEG appearance is not a goal, although it may be useful as a test reference.
+Fujifilm X-T5 support may be a first-class advantage even if this makes the software less generic. The no-edit X-T5 baseline is called **Camera-Neutral** and uses a camera-produced Standard JPEG as a relative rendering target. It is not presented as a Fujifilm film simulation or as calibrated scene colour. Other built-in JPEG appearances remain references rather than rendering modes unless the human owner decides otherwise.
 
 ## Target system
 

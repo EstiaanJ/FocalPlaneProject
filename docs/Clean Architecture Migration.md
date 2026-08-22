@@ -12,9 +12,9 @@ tags:
 
 This is the implementation guide for consolidating the current experiments into the architecture defined by [[Architecture Decisions]]. The current Focal Editor scope is described in [[Focal Editor & Focal Core]] and [[MVP]]. Keep later GUI decisions in those product documents rather than silently expanding this migration guide.
 
-The sequence below records the migration logic and retains completed instructions for context. The known-defect corrections and first editor slice are complete. FocalCore execution, colour, curve, and numerical scope contracts are substantially implemented, as are the checked Phase One and Phase Two editor features in [[MVP]]. The shared `focal-io` crate, canonical harness renames, permanent gamut mapping, measured 150 ms cancellation evidence, and preview/export calibration for scale-dependent modules remain outstanding.
+The sequence below records the migration logic and retains completed instructions for context. The known-defect corrections and first editor slice are complete. FocalCore execution, colour, curve, and numerical scope contracts are substantially implemented, as are the checked Phase One and Phase Two editor features in [[MVP]]. The `focal-io` boundary now exists with an initial X-T5 sensor decoder; migration of the existing decoded-image and export responsibilities into it remains outstanding. Canonical harness renames, permanent gamut mapping, measured 150 ms cancellation evidence, and preview/export calibration for scale-dependent modules also remain outstanding.
 
-An initial X-T5 decoder experiment was evaluated and then removed when RAW work was paused. It did not enter the production architecture, and the workspace currently has no RAW decoder dependency or partially integrated RAW path.
+An initial X-T5 decoder experiment was evaluated and then removed when RAW work was paused. It did not enter the production architecture. RAW research subsequently resumed using the annotated Camera-Neutral reference dataset under `test-image/X-T5_RAW`. The new `focal-io` boundary decodes and validates X-T5 mosaics through Rawler and exposes normalised scene-linear sensor samples; Camera-Neutral development remains research tooling until its colour and tone rendering passes the documented numerical and visual checks.
 
 ## Intended dependency direction
 
