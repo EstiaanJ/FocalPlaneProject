@@ -3,13 +3,18 @@ aliases:
   - Clean architecture plan
   - Architecture migration
   - FocalPlane architecture instructions
+tags:
+  - authorship/mixed
+  - audience/agents
 ---
 
 # Clean architecture migration
 
 This is the implementation guide for consolidating the current experiments into the architecture defined by [[Architecture Decisions]]. The current Focal Editor scope is described in [[Focal Editor & Focal Core]] and [[MVP]]. Keep later GUI decisions in those product documents rather than silently expanding this migration guide.
 
-The sequence below records the migration logic, not current completion status. The repository foundation, known-defect corrections, FocalCore execution and colour contracts, production scope extraction, and first editor slice are substantially implemented. The shared `focal-io` crate and canonical harness renames remain outstanding.
+The sequence below records the migration logic and retains completed instructions for context. The known-defect corrections and first editor slice are complete. FocalCore execution, colour, curve, and numerical scope contracts are substantially implemented, as are the checked Phase One and Phase Two editor features in [[MVP]]. The shared `focal-io` crate, canonical harness renames, permanent gamut mapping, measured 150 ms cancellation evidence, and preview/export calibration for scale-dependent modules remain outstanding.
+
+An initial X-T5 decoder experiment was evaluated and then removed when RAW work was paused. It did not enter the production architecture, and the workspace currently has no RAW decoder dependency or partially integrated RAW path.
 
 ## Intended dependency direction
 
@@ -93,12 +98,16 @@ Avoid fusing modules in the reference merely for speed. An accelerated implement
 
 ### Phase 1 — repository foundation
 
+**Status: partially complete.** Root guidance, workspace quality commands, and the shared target directory are in place. The harness renames and an automated documentation-link check remain outstanding.
+
 - Create the root project guidance and quality gates.
 - Rename the experimental applications in an isolated change.
 - Use the workspace root target directory and remove obsolete member-local build artefacts after confirming they contain no source material.
 - Add automated formatting, Clippy, tests, and documentation-link checks.
 
 ### Phase 2 — fix known defects before extraction
+
+**Status: complete.** The retained regression ledger is [[Bug Report]].
 
 Resolve the confirmed bugs in [[Bug Report]] before treating experimental code as production-ready:
 
@@ -113,6 +122,8 @@ These defects are now corrected and their tests remain active regressions. New e
 
 ### Phase 3 — build `focal-io`
 
+**Status: outstanding.** Focal Editor currently keeps these responsibilities in its provisional `image_io` module; FocalCurve and FocalPlot retain their own experimental boundaries.
+
 - Define one decoded-image result containing pixels, dimensions, source profile information, source bit depth, metadata, orientation status, and transparency status.
 - Apply orientation once.
 - Use proper ICC interpretation and transforms; do not infer a profile by searching arbitrary bytes for a name.
@@ -121,6 +132,8 @@ These defects are now corrected and their tests remain active regressions. New e
 - Keep file dialogs and confirmation UI in the calling application.
 
 ### Phase 4 — harden FocalCore execution
+
+**Status: substantially complete.** Exact-version rejection, parameter validation, immutable snapshots, Preview/Export quality, cancellation, progress, crop boundaries, and deterministic state-transition tests are present. The 150 ms target still needs measurement on the target system, and scale-dependent preview calibration remains open.
 
 - Add parameter validation and exact-version rejection.
 - Add the render execution context from [[Architecture Decisions#Render execution contract]].
@@ -131,6 +144,8 @@ These defects are now corrected and their tests remain active regressions. New e
 
 ### Phase 5 — consolidate the MVP colour and curve pipeline
 
+**Status: substantially complete.** FocalCore owns the production image contracts, Adobe RGB MVP curve semantics, Smooth curve evaluation, and the approved curve modes. Its current output transform performs matrix conversion followed by channel bounding; the permanent gamut-mapping algorithm remains unresolved.
+
 - Add explicit types/contracts for linear Adobe RGB, encoded Adobe RGB curve values, linear output sRGB, and encoded output sRGB.
 - Implement and test the canonical MVP transform order from [[Architecture Decisions#Colour pipeline for the MVP]].
 - Port only Smooth evaluation and Linked RGB, Luma, and Per-channel RGB modes into FocalCore.
@@ -140,18 +155,22 @@ These defects are now corrected and their tests remain active regressions. New e
 
 ### Phase 6 — consolidate scopes and reusable widgets
 
+**Status: partially complete.** GUI-independent CIE and RYB analysis, cancellation, and reverse-selection calculations live in FocalCore, and Focal Editor uses that analysis through the reusable FocalPlot presentation. The standalone harness retains its richer click-to-lock reverse-search interaction, and the `sampled_pixels` naming remains unchanged.
+
 - Move GUI-independent scope analysis behind a FocalCore API with no egui dependency.
 - Keep density-texture construction and drawing in FocalPlot unless profiling demonstrates a reason to move a numeric part.
 - Implement click-to-lock reverse selection and right-click cancel/clear.
 - Rename `sampled_pixels` to reflect whether it counts sampled blocks or report a separately calculated source-pixel coverage.
 - Preserve the standalone FocalPlot harness for human visual evaluation.
 
-### Phase 7 — build the first Focal Editor vertical slice (complete)
+### Phase 7 — build the first Focal Editor vertical slice
+
+**Status: complete through the provisional editor-owned I/O boundary.** Moving decoding and encoding into `focal-io` remains Phase 3 work rather than a reason to describe the editor slice itself as incomplete.
 
 The current approved GUI scope is documented in [[MVP]] and [[Focal Editor & Focal Core]]. Implement only its currently approved slice:
 
 1. open one decoded PNG or JPEG without import;
-2. process it through `focal-io` and FocalCore;
+2. process it through the provisional editor-owned I/O boundary and FocalCore, then migrate that boundary to `focal-io` in Phase 3;
 3. expose the first approved global adjustment;
 4. show responsive Before and After previews;
 5. cancel superseded previews within the 150 ms budget;

@@ -2,13 +2,17 @@
 aliases:
   - Slider controls
   - Editor controls
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # Sliders
 
 These controls follow [[MVP#Control principles|the shared interaction principles]]. Their processing belongs to [[Focal Editor & Focal Core#GUI and Focal Core boundary|Focal Core]], not the GUI.
 
-## First prototype
+## Implemented controls
 
 ### Exposure
 
@@ -26,6 +30,18 @@ Represented by two controls:
 - Tint
 
 For decoded PNG/JPEG inputs these derive opponent-channel gains in linear Adobe RGB while preserving neutral lightness. Future RAW temperature and tint use separate camera-aware semantics.
+
+### Local Contrast
+
+A global spatial adjustment with Amount and Radius controls. It does not imply brushes or spatial masks.
+
+### Saturation
+
+Adjusts saturation with protection for highlights and already highly saturated colours.
+
+### Noise Reduction
+
+Decoded-image noise reduction with separate Luminance and Colour strengths. It is distinct from future camera-profiled RAW denoising.
 
 ## Proposed later controls
 
@@ -49,10 +65,6 @@ Brings midtones up or down.
 
 Adjusts the black point.
 
-### Saturation
-
-Adjusts saturation.
-
 ### Vibrance
 
 Adjusts colour intensity while behaving differently from simple saturation. The exact model is not yet defined.
@@ -60,14 +72,6 @@ Adjusts colour intensity while behaving differently from simple saturation. The 
 ### Sharpness
 
 Sharpening.
-
-### Noise Reduction
-
-Noise-reduction options, potentially including different strategies or algorithms.
-
-### Local Contrast
-
-Local contrast is a global photographic adjustment. It does not imply brushes or spatial masks.
 
 ### Exposure Curve
 

@@ -6,7 +6,7 @@ aliases:
 
 # MVP
 
-The MVP is defined primarily by what is deliberately excluded or delayed. Once the human owner declares the MVP done we can call it that and move on; the scope does not need to be frozen prematurely as an exhaustive feature checklist.
+The MVP is defined primarily by what is deliberately excluded or delayed. The human owner will declare it complete when FocalPlane can satisfactorily handle more than half of their real editing work. This is a judgement based on practical use, not an exhaustive feature checklist or a requirement that every item assigned to an early phase is complete.
 
 ## First prototype
 

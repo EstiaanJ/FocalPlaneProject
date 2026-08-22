@@ -3,6 +3,10 @@ aliases:
   - Vectorscope
   - Darktable vectorscope research
   - Colour scope
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # Vectorscope Research

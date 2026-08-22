@@ -1,3 +1,9 @@
+---
+tags:
+  - authorship/mixed
+  - audience/agents
+---
+
 # Decoded-image correction research
 
 This note records the research and approved direction for white balance, local contrast, and noise reduction on already-rendered PNG and JPEG inputs. These controls remain separate from the future RAW-specific implementations.

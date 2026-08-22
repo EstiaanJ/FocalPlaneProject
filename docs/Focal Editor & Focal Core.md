@@ -3,6 +3,10 @@ aliases:
   - Focal Editor
   - Focal Core
   - Editor and Core
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # Focal Editor & Focal Core
@@ -77,9 +81,7 @@ Inside the process, a photo should be represented as finite `f32` per channel pe
 
 Floating point is not permission to erase semantics: each image must identify its domain, channel meaning, primaries and white point where applicable, and exposure convention. In the proper RAW architecture, the scene representation is unbounded by display range; clipping and quantisation belong at explicit display or output boundaries.
 
-The proper implementation must use a wide-gamut, scene-referred working domain. The exact primaries and encoding are not settled, and must be evaluated deliberately for web, print, calibrated-monitor, and archival output rather than defaulting silently to ACEScg or another convenient choice.
-
-For the decoded-image MVP only, the editable curve uses canonical encoded Adobe RGB (1998). This is temporary. The proper camera-RAW implementation will use a wide-gamut, scene-referred working domain; its exact primaries and encoding remain open.
+The binding decoded-image and future RAW colour contracts live in [[Architecture Decisions#Colour pipeline for the MVP]] and [[Architecture Decisions#Colour pipeline for the proper implementation]].
 
 Fujifilm X-T5 support may be a first-class advantage even if this makes the software less generic. Matching Fujifilm's built-in JPEG appearance is not a goal, although it may be useful as a test reference.
 
@@ -98,12 +100,4 @@ Use British English where practical in code, comments, and documentation: `colou
 
 ## Related documentation
 
-- [[FocalPlane]] — project values and scope
-- [[MVP]] — first prototype and exclusions
-- [[Presets and Saved Edits]] — document and batch-edit model
-- [[Focal Core Pipeline]] — modular ordering, order experiments, and optional preview caching
-- [[Sliders]] — initial controls
-- [[Testing]] — CPU reference and controlled reproducibility
-- [[Engineering Principles]] — code quality and human-directed decision making
-- [[Architecture Decisions]] — settled architecture and colour contracts
-- [[Clean Architecture Migration]] — consolidation sequence and dependency direction
+Use the [[README|documentation home]] for the maintained index. The most direct specifications for this application are [[MVP]], [[Sliders]], [[Architecture Decisions]], and [[Focal Core Pipeline]].

@@ -3,6 +3,10 @@ aliases:
   - Bugs
   - Known bugs
   - Regression tests
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # Defect and regression ledger
@@ -29,15 +33,7 @@ These require a decision, shared boundary, or further evidence rather than a bug
 
 ## Recurring patterns and lessons
 
-Most historical defects occurred at boundaries rather than inside isolated calculations:
-
-- **Asynchronous ownership:** stale previews, exports, loads, scopes, and thumbnails shared identities or survived replacement. Each work type needs its own immutable request identity and cancellation state; accept a result only when its complete image-and-edit identity is still current.
-- **Image meaning:** colour domain, encoding, range, profile, alpha, bit depth, and orientation were lost or inferred. Carry these as explicit contracts and centralise file interpretation in `focal-io`.
-- **Invalid state:** non-finite values, malformed metadata, unsupported versions, impossible dimensions, and broken curve invariants reached algorithms. Validate at construction, deserialisation, and public boundaries; keep invariant-protecting fields private.
-- **Incorrect routing:** correct helpers received the wrong source, crop state, quality, or revision. Integration tests must prove what actually reaches preview, processing, and export.
-- **Visible behaviour:** numerical correctness did not guarantee acceptable crop interaction, zoom detail, appearance, or responsiveness. Every visible feature needs repeatable human checks alongside automation.
-
-The governing lesson is to make data meaning and asynchronous ownership explicit, reject invalid state early, and test complete state transitions and application boundaries. The actionable strategy and review checklist live in [[Testing]].
+Most historical defects occurred at boundaries: asynchronous ownership, image meaning, invalid state, incorrect routing, and visible behaviour which numerical tests alone could not judge. Make those contracts explicit, reject invalid state early, test complete state transitions, and retain repeatable human checks for visible work. The actionable strategy and review checklist live in [[Testing]].
 
 ## 2026-08-19 project audit
 
@@ -57,7 +53,7 @@ These original audit defects are fixed. FP-PLOTS-001 is internally consistent in
 | ID | Area | Defect | Active regression test |
 | --- | --- | --- | --- |
 | FP-CORE-003 | FocalCore | Cancellation raised by an initial or final progress callback could be reported as success. | `pipeline::tests::cancellation_during_initial_progress_cancels_an_empty_pipeline`; `pipeline::tests::cancellation_during_empty_completion_progress_does_not_report_success`; `pipeline::tests::cancellation_during_final_progress_does_not_report_success` |
-| FP-CORE-004 | FocalCore | Negative white-balance multipliers were accepted. | `pipeline::tests::negative_white_balance_multipliers_are_rejected` |
+| FP-CORE-004 | FocalCore | Invalid white-balance state was accepted before the decoded-image controls were consolidated as bounded Warmth and Tint parameters. | `pipeline::tests::out_of_range_white_balance_adjustments_are_rejected`; `module::tests::adjustment_validation_rejects_non_finite_percentage_values` |
 | FP-PLOTS-004 | FocalPlot | Scope mapping accepted out-of-domain coordinates and silently clamped negative reverse-search radii. | `vectorscope::tests::linear_source_coordinates_reject_values_outside_display_domain`; `vectorscope::tests::reverse_highlight_rejects_negative_radius` |
 | FP-PLOTS-005 | FocalPlot | Reverse searches started from hover, could not capture clicks, and did not cancel active scans. | `app::tests::scope_hover_does_not_start_reverse_search`; `app::tests::scope_panels_capture_clicks_without_enabling_dragging`; `loader::tests::cancelled_highlight_does_not_emit_a_stale_result` |
 
@@ -90,7 +86,7 @@ Thirty new issues were independently confirmed and corrected. Candidates 003, 01
 | FP-AUDIT-011/012 | FocalPlot | Public scope rendering trusted invalid resolution and buffer shapes and could panic. | `vectorscope::tests::trace_rendering_rejects_invalid_public_analysis_shapes` |
 | FP-AUDIT-014 | FocalPlot | Wide single-row reverse scans did not check cancellation often enough. | `vectorscope::tests::a_wide_single_row_reverse_scan_observes_cancellation` |
 | FP-AUDIT-015 | FocalPlot | Scrolling unrelated UI changed reverse-search radius. | `app::tests::scope_scroll_is_ignored_when_the_scope_is_not_hovered` |
-| FP-AUDIT-018 | FocalCurve | Decode discarded alpha before the decided transparency boundary. | `pipeline::tests::transparent_input_requires_confirmation_and_can_flatten_over_white` |
+| FP-AUDIT-018 | FocalCurve | Decode discarded alpha before the decided transparency boundary. | `pipeline::tests::transparent_input_requires_confirmation_and_can_flatten_over_black_in_linear_light` |
 | FP-AUDIT-020 | FocalCurve | EXIF ColorSpace parsing ignored the TIFF count. | `pipeline::tests::malformed_exif_colour_space_count_is_rejected` |
 | FP-AUDIT-021 | FocalCurve | Public source dimensions could disagree with their buffers. | `pipeline::tests::preparation_rejects_inconsistent_and_non_finite_source_pixels` |
 | FP-AUDIT-022 | FocalCurve | Obsolete decode and preparation monopolised the worker. | `loader::tests::an_active_obsolete_request_does_not_block_a_new_request` |

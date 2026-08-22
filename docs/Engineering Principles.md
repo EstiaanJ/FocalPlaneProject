@@ -3,6 +3,9 @@ aliases:
   - Engineering standard
   - Development principles
   - Software quality
+tags:
+  - authorship/mixed
+  - audience/agents
 ---
 
 # Engineering Principles
@@ -29,16 +32,9 @@ Human observation is one of the project's testing vectors, especially for GUI in
 
 ## Testing expectations
 
-- Test pure processing code independently of the GUI.
-- Use unit tests for algorithms, invariants, parameter boundaries, and error handling.
-- Use integration and contract tests at module and application boundaries.
-- Use controlled fixtures and golden outputs where they provide a meaningful correctness signal.
-- Test cancellation, stale-result rejection, and asynchronous state transitions rather than relying only on happy-path rendering.
-- Keep tests deterministic where practical. Document intentional tolerances and their justification.
-- Treat bugs as opportunities to add focused regression tests.
-- Include manual visual and interaction checks for behaviour which cannot be judged adequately from numbers alone.
+Test pure processing independently of the GUI, important boundaries through integration or contract tests, and asynchronous state transitions deterministically. Use controlled fixtures or golden outputs where they carry a meaningful correctness signal, retain focused regression tests for defects, and include manual checks where visible behaviour cannot be judged adequately from numbers alone. [[Testing]] contains the detailed strategy and review checklist.
 
-High coverage is a goal, not permission to write shallow tests which merely execute lines. Coverage should help us find untested decisions, edge cases, and failure paths.
+High coverage should help find untested decisions, edge cases, and failure paths; it is not a reason to write shallow tests which merely execute lines.
 
 ## GUI technology
 
@@ -46,6 +42,4 @@ Use egui and eframe for FocalPlane desktop GUIs, including the exposure-curve su
 
 ## Related documentation
 
-- [[Testing]] — test strategy and reproducibility
-- [[Focal Editor & Focal Core]] — GUI and processing boundary
-- [[Focal Core Pipeline]] — modular processing architecture
+Use the [[README|documentation home]] for the maintained index. [[Testing]] contains the detailed quality strategy.

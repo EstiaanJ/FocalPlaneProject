@@ -2,6 +2,10 @@
 aliases:
   - Focal Plane
   - Project overview
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # FocalPlane
@@ -61,16 +65,4 @@ Lightroom and the iPhone gallery editor are the closest existing references for 
 
 ## Project documentation
 
-- [[README|Documentation home]]
-- [[MVP]] — prototype target and features explicitly deferred beyond MVP
-- [[Focal Editor & Focal Core]] — editor, processing pipeline, and engineering conventions
-- [[Focal Core Pipeline]] — opinionated module order, experimentation, and preview execution
-- [[Presets and Saved Edits]] — Save versus Export, presets, edit state, and copying
-- [[Sliders]] — current controls and interaction rules
-- [[FocalLib]] — later library-management workflow
-- [[Testing]] — reference implementation and reproducibility
-- [[Engineering Principles]] — correctness, maintainability, testing, and human involvement
-- [[Vectorscope Research]] — vectorscope algorithm research and FocalPlane design direction
-- [[Open Questions]] — decisions deliberately left unanswered
-- [[Architecture Decisions]] — decisions settled by the human owner
-- [[Clean Architecture Migration]] — instructions for the next architectural phase
+Use the [[README|documentation home]] as the maintained index of product, architecture, testing, research, and status documents.

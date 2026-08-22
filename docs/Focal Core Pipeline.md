@@ -4,6 +4,9 @@ aliases:
   - Pipeline architecture
   - Focal Core modules
   - Focal Core Graph
+tags:
+  - authorship/mixed
+  - audience/agents
 ---
 
 # Focal Core Pipeline
@@ -54,9 +57,7 @@ Preview and export use the same module order and processing semantics. Preview m
 
 ## MVP colour path
 
-The decoded-image MVP uses one canonical encoded Adobe RGB (1998) domain for curve evaluation. Source profile interpretation and conversion into that domain happen before the curve; conversion and gamut mapping into output sRGB happen after it. Do not clip to sRGB before the curve.
-
-This bounded perceptual curve domain is not the proper RAW working space. The camera-RAW implementation will use a wide-gamut, scene-referred domain under a later pipeline version.
+The binding decoded-image colour path, including the temporary Adobe RGB curve domain and the later scene-referred RAW direction, lives in [[Architecture Decisions#Colour pipeline for the MVP]]. The current CPU reference bounds channels after its Adobe RGB-to-sRGB matrix conversion; the permanent gamut-mapping algorithm remains a human-owned decision.
 
 ## Possible future graph
 

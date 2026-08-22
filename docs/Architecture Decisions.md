@@ -3,6 +3,10 @@ aliases:
   - Architecture decisions
   - Decided architecture
   - Technical decisions
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # Architecture decisions
@@ -77,9 +81,15 @@ The Luma curve must use coefficients appropriate to the canonical Adobe RGB prim
 
 Input conversion, curve evaluation, output conversion, gamut handling, and quantisation are separate stages with independently testable contracts. Do not clip to sRGB before the curve.
 
+The current CPU reference performs the Adobe RGB-to-sRGB matrix conversion and then bounds output channels. That is an implementation baseline, not the still-unresolved permanent gamut-mapping algorithm.
+
 ## Colour pipeline for the proper implementation
 
 The proper camera-RAW implementation will use a wide-gamut, scene-referred working domain. That is the only acceptable long-term direction.
+
+For Fujifilm X-T5 RAW files, the no-edit default will be an opinionated rendering calibrated towards the camera's Provia/Standard JPEG. This is a relative camera-rendering target, not a claim of colourimetric calibration. The supplied paired RAW and JPEG may guide initial research, but production behaviour must be validated across held-out regions, exposures, subjects, and lighting. RAW implementation is currently paused, and no decoder or camera-specific rendering path is integrated.
+
+The default rendering for other RAW cameras, and the boundary between a camera-specific baseline and explicit creative edits, remain human-owned decisions.
 
 The exact working primaries, scene encoding, perceptual curve representation, handling of negative and above-one values, and display transform remain decisions for later experimentation. Do not treat the MVP's canonical Adobe RGB curve domain as the permanent RAW architecture.
 
@@ -143,13 +153,17 @@ Modules must check cancellation often enough that obsolete work normally stops w
 
 Progress must describe the current request and must not allow progress from a stale request to replace the newest state. Preview and Export use the same processing meaning and module order; quality may select documented approximations or resolution.
 
-Interactive preview rendering must never process the full-resolution source merely because it is available. The editor prepares and caches a source sized for the physical pixels available to the photo view, then applies exposure, curves, colour, and other processing to that bounded source. A typical large photograph should therefore require roughly display-resolution work rather than 25–40 MP work for every slider update. Export alone applies the accepted immutable edit snapshot to the full-resolution source.
+Interactive preview rendering must never process the full-resolution source merely because it is available. The editor samples the required visible region to a size bounded by the physical pixels available to the photo view, then applies exposure, curves, colour, and other processing to that sample. The current implementation also applies a one-megapixel preview cap. A typical large photograph should therefore require roughly display-resolution work rather than 25–40 MP work for every slider update. Export alone applies the accepted immutable edit snapshot to the full-resolution source.
 
-Zoom does not remove this bound. The editor selects the corresponding source-image region and resamples that region to the physical pixel dimensions of the preview, using source pixels up to a native display ratio of 1:1 where available. Images smaller than the preview are processed at their original dimensions and enlarged for presentation with nearest-neighbour sampling; they must not be upsampled before adjustment processing.
+Preview policy prioritises interactive speed while preserving the global appearance of the full-resolution result. Scale-dependent modules, especially decoded-image noise reduction and local contrast, must be calibrated empirically: process a high-resolution reference, reduce that result to a representative 1440p preview size, and compare it with a preview-sized source processed using scale-adjusted parameters. Test each module independently and in combination. The goal is the closest practical match at the final display size; acceptable numerical and visual tolerances remain to be established from these experiments.
+
+Zoom does not remove this bound. The editor selects the corresponding source-image region and resamples that region towards the physical pixel dimensions of the preview, subject to the current cap and using source pixels up to a native display ratio of 1:1 where available. Images smaller than the preview are processed at their original dimensions and enlarged for presentation with nearest-neighbour sampling; they must not be upsampled before adjustment processing.
 
 ## Saved edit state
 
 Prototype sidecars store all editing parameters required to reproduce the edit. Adjustments are stored as **absolute values**, not offsets from preset values.
+
+The current editor writes versioned sidecars but does not yet load them. Version validation on load remains a required boundary rather than implemented behaviour.
 
 For example, if a preset supplies contrast `+20` and the photograph is changed to `+15`, the adjustment records `+15`, not `-5`.
 

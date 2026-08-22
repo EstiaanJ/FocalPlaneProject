@@ -3,6 +3,10 @@ aliases:
   - Focal Lib
   - Photo library
   - Library manager
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # FocalLib

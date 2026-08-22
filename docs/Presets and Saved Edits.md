@@ -4,6 +4,10 @@ aliases:
   - Saved edits
   - Save and Export
   - Edit state
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # Presets and Saved Edits
@@ -12,7 +16,7 @@ aliases:
 
 Focal Editor must distinguish clearly between **Save** and **Export**.
 
-- **Save** preserves a native, editable document which can be opened and changed later.
+- **Save** is intended to preserve a native, editable document which can be opened and changed later.
 - **Export** renders the image destructively into an output such as JPEG or PNG.
 
 On first save, or when using Save As, the user should eventually be able to choose how to store the editable document:
@@ -21,7 +25,7 @@ On first save, or when using Save As, the user should eventually be able to choo
 - an image plus a sidecar file;
 - edit state stored in FocalLib when FocalLib is managing that photograph.
 
-For the prototype and MVP, use a JSON sidecar. I generally dislike photo applications creating extra XML or other files throughout a photo library, so a sidecar must not become the only long-term workflow merely because it is the first implementation.
+For the prototype and MVP, use a JSON sidecar. The current editor writes this state but does not yet load it. I generally dislike photo applications creating extra XML or other files throughout a photo library, so a sidecar must not become the only long-term workflow merely because it is the first implementation.
 
 Original photographs should remain untouched except for explicitly appropriate metadata changes, such as an “edited by” software field. FocalLib may eventually store a UUID in metadata as a backup reference to its database.
 

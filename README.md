@@ -12,7 +12,7 @@ Start with [`docs/README.md`](docs/README.md), then read:
 
 ## Current folder structure
 
-The tracked project structure is shown below. Generated `target/` directories and local tool metadata are omitted.
+The working project structure is summarised below. Generated `target/` directories, local tool metadata, and most individual documentation and fixture files are omitted.
 
 ```text
 FocalPlaneProject/
@@ -32,14 +32,5 @@ FocalPlaneProject/
 │       ├── examples/
 │       └── src/
 ├── docs/                      # Product, architecture, testing, and research notes
-│   ├── README.md
-│   ├── FocalPlane.md
-│   ├── Architecture Decisions.md
-│   ├── Clean Architecture Migration.md
-│   ├── Engineering Principles.md
-│   ├── Testing.md
-│   └── Bug Report.md
-└── test-image/                # Controlled images and RTSet comparisons
-    ├── README.md
-    └── RTSet/
+└── test-image/                # Local controlled images and RTSet comparisons
 ```

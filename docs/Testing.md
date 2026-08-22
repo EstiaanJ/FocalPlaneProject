@@ -2,6 +2,10 @@
 aliases:
   - Quality
   - Test strategy
+tags:
+  - authorship/mixed
+  - audience/human
+  - audience/agents
 ---
 
 # Testing and quality
@@ -45,15 +49,15 @@ A superseded preview must stop doing useful work within **150 ms** under support
 
 The 150 ms target is a cancellation-latency contract, not permission to block the UI thread.
 
-Interactive preview tests must prove that large decoded sources are replaced by a cached, display-bounded render source before adjustment processing, while Export selects the untouched full-resolution source. Keep this as a boundary regression test: testing only the downsampling calculation is insufficient because the original performance regression was caused by routing the correct full-resolution buffer into the wrong render path. Zoom tests must likewise prove that only the visible source region is resampled to the physical preview dimensions, and small-image tests must prove that nearest-neighbour enlargement happens after original-size processing.
+Interactive preview tests must prove that adjustment processing receives a display-bounded sample from the decoded source, while Export receives the untouched full-resolution source. The current editor retains the full source and resamples the requested visible region for each preview, subject to a one-megapixel cap; it does not cache a separate bounded source image. Keep the routing contract as a boundary regression test rather than testing only the sampling calculation. Small-image tests must prove that nearest-neighbour enlargement happens after original-size processing.
 
 ## Reproducible edit state
 
-Under tightly controlled conditions, loading the same starting image and the same saved edit state should export identical pixels and stable metadata, apart from deliberately volatile fields such as creation time.
+Once sidecar loading is implemented, loading the same starting image and the same saved edit state under tightly controlled conditions should export identical pixels and stable metadata, apart from deliberately volatile fields such as creation time.
 
 This tests whether presets and saved edits capture enough information. It is not a promise of compatibility between development builds. During rapid development, processing changes may invalidate old saved edits and outputs.
 
-Sidecars with an unsupported schema or pipeline version must fail clearly. Tests should specifically reject them; there are no migrations during this rapid-development phase.
+The current editor writes versioned sidecars but does not load them. The loading boundary must reject unsupported schema or pipeline versions clearly when it is added; there are no migrations during this rapid-development phase.
 
 Tests need to control or explicitly tolerate:
 
@@ -65,6 +69,15 @@ Tests need to control or explicitly tolerate:
 - colour transforms and output profiles.
 
 Exact tolerances for accelerated previews and renders remain to be defined.
+
+For scale-dependent modules, preview fidelity must be measured against the full-resolution result as it will actually be viewed. Build fixtures for decoded-image noise reduction, local contrast, and their combination. For each fixture and representative parameter setting:
+
+1. process the full-resolution source at Export quality, then reduce it to a representative 1440p display-sized image;
+2. prepare the source through the real preview downsampling path and process it at Preview quality using explicitly scale-adjusted parameters;
+3. compare the two equal-sized results numerically and by human visual review;
+4. repeat across source resolutions, preview scales, radii or strengths, and photographic content.
+
+Local-contrast radii should initially scale with the source-to-preview dimension ratio. Noise reduction must be evaluated separately because source reduction changes the noise distribution before the filter runs; do not assume that radius scaling alone preserves its meaning. Include global colour and tone error, structural or multi-scale similarity, edge and halo behaviour, retained fine detail, and residual luminance and chroma noise. Any approximation must be deterministic and documented, and the experiment must establish both its fidelity and its speed benefit before it becomes Preview behaviour.
 
 Human evaluation remains required for control behaviour, visual artefacts, perceived responsiveness, and any claimed preview/export equivalence. Each visible feature should record a short repeatable checklist naming the fixtures, gestures, zoom levels, expected behaviour, and artefacts to inspect so “looks right” does not become an undocumented substitute for a test.
 
@@ -85,23 +98,6 @@ Before merging processing, file-boundary, or editor work, verify:
 
 Correct cancellation is not enough by itself: measure the **150 ms** target on the target system with a repeatable benchmark or performance test.
 
-## Phase Two feature review record
+## Review records
 
-The implemented Phase Two features were reviewed against the checklist on
-2026-08-21. The unchecked RAW, HEIC, and additional-hotkey items in `MVP.md`
-remain explicitly unsupported and are not represented as partial file-format
-implementations.
-
-| Feature | Contract, invalid state, and adversarial coverage | Async and routing evidence | Manual review still required |
-| --- | --- | --- | --- |
-| Clipping warnings | Masks are captured from the linear Adobe RGB to output-sRGB boundary before display clamping; Preview-only allocation is explicit. Black, white, red, blue, grey, and fallback display pixels are covered. | The mask travels with the immutable preview generation and is discarded with stale frames. | On a profiled 16-bit gradient, toggle highlights and lowlights independently at 1x and zoomed views; inspect saturated red/blue and neutral black/white patches for false warnings. |
-| Loupe | Cursor geometry is clamped to the preview bounds and its UVs are relative to the actually displayed sampled texture. Boundary and sampled-region tests cover the coordinate contract. | It presents the accepted preview texture only; it does not initiate processing or mutate edits. | Toggle with `L`, move continuously across the image and letterboxing, and repeat at 1x and high zoom; verify the crosshair remains cursor-centred and detail follows the pointer. |
-| Processing bar | Loading, processing, export-processing, and ready states have bounded fractions and distinct documented colours; panel layout reserves its height. | Loading, preview rendering, export rendering, and stale completion state are kept separate; obsolete exports are cancelled and ignored. | Resize the window and right rail, then open a large TIFF, change a control, and export; verify the bar never clips, overlaps controls, or reports Ready while work is active. |
-| TIFF input | The decode boundary preserves dimensions, orientation, alpha detection, 16-bit precision, and embedded ICC-to-Adobe-RGB or unprofiled-sRGB contracts. | Decode and thumbnail work remain outside the GUI thread, carry cancellation tokens, and reject obsolete selected-image generations. | Open RGB/RGBA 8-bit and 16-bit TIFFs with orientation and Adobe RGB profiles; verify transparency confirmation, thumbnails, preview, and sRGB export. |
-| Copy and paste edits | The copied value object contains all current absolute adjustments, including crop state, and target application revalidates crop safety for the destination dimensions. | Context-menu paste to another filmstrip item loads that item before applying the immutable copied snapshot; stale loads cannot install it. | Copy from an edited image, paste to the current and a different filmstrip image, then verify every control and crop result; try missing-copy and failed-load paths. |
-| White-balance picker | The picker samples the immutable Before preview, rejects non-finite and unusably dark samples, and keeps warmth/tint within FocalCore's validated ranges. | Sampling is UI-only; applying a result creates a new immutable preview request and cannot reuse an adjusted output pixel. | Pick a neutral patch at image edges and at zoom, verify the dropper cursor/icon, confirm the picker exits after a successful sample, and cancel with `Escape`. |
-
-The automated checks above are part of the ordinary workspace suite. The manual
-column is deliberately not marked complete by automated tests: visual artefacts,
-perceived responsiveness, and photographic usefulness still require a human
-run on the target desktop with the named fixtures.
+Dated applications of this checklist live in [[Project Audits]]. Confirmed defects and their retained automated regressions live in [[Bug Report]].
