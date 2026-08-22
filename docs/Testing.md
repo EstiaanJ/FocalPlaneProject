@@ -30,7 +30,8 @@ machine's core count or transfer overhead into a universal speed requirement.
 On a validation machine with the fixtures and a usable adapter, set
 `FOCAL_REQUIRE_GPU_TESTS=1` so an unavailable adapter or missing fixture is a
 failure. Ordinary clean-clone testing may still skip hardware-dependent GPU
-execution while compiling the GPU implementation.
+execution while compiling the GPU implementation; set `FOCAL_RUN_GPU_TESTS=1`
+to opt into the adapter tests without making an unavailable adapter fatal.
 
 The benchmark prepares owned CPU inputs before timing so image cloning does not
 inflate Reference or Optimized CPU execution relative to borrowed GPU input.

@@ -9,7 +9,7 @@ Focal Editor is the standalone desktop editor described in `../../docs/MVP.md` a
 - Implement exposure in stops and contrast from `-100` to `+100`.
 - Keep a small input/output histogram visible.
 - Save editable state as a versioned JSON sidecar.
-- Export an 8-bit sRGB PNG.
+- Export an 8-bit sRGB PNG or JPEG; JPEG quality is selected in the editor.
 - Keep the UI responsive with background loading/rendering and latest-request-wins result handling.
 - Keep the current high-level layout: Navigator at the upper left, presets below it, histograms at the top of the right rail, controls below the histograms, the photo viewer in the centre, and the filmstrip along the bottom.
 - Keep the loading/progress treatment in the top bar; the status remains there

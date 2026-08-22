@@ -5,6 +5,10 @@ edition.workspace = true
 description = "Standalone FocalPlane photo editor"
 license = "GPL-3.0-or-later"
 
+[features]
+default = ["gpu"]
+gpu = ["focal-core/gpu"]
+
 [dependencies]
 eframe.workspace = true
 focal-core.workspace = true

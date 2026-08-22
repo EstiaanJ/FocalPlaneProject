@@ -38,6 +38,10 @@ fn gpu_tests_required() -> bool {
     std::env::var("FOCAL_REQUIRE_GPU_TESTS").is_ok_and(|value| value == "1")
 }
 
+fn gpu_tests_enabled() -> bool {
+    gpu_tests_required() || std::env::var("FOCAL_RUN_GPU_TESTS").is_ok_and(|value| value == "1")
+}
+
 fn to_focal_image(decoded: &DynamicImage) -> Image {
     let rgb = decoded.to_rgb32f();
     let (width, height) = rgb.dimensions();
@@ -49,6 +53,10 @@ fn to_focal_image(decoded: &DynamicImage) -> Image {
 }
 
 fn available_gpu() -> Option<(MutexGuard<'static, ()>, focal_core::gpu::GpuPipeline)> {
+    if !gpu_tests_enabled() {
+        eprintln!("skipping GPU test: set FOCAL_RUN_GPU_TESTS=1 to run hardware tests");
+        return None;
+    }
     let guard = GPU_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -119,6 +127,29 @@ fn gpu_matches_cpu_reference_on_top_level_fixtures() {
 }
 
 #[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn gpu_export_quantisation_matches_cpu_reference() {
+    let Some(source) = fixture("gradients.png") else {
+        return;
+    };
+    let Some((_guard, gpu)) = available_gpu() else {
+        return;
+    };
+    let pipeline = Pipeline::default();
+    let (cpu, _) = pipeline.render(source.clone()).unwrap();
+    let (gpu, _) = gpu.render(&pipeline, &source).unwrap();
+    let quantise = |image: &Image| {
+        image
+            .pixels()
+            .iter()
+            .flatten()
+            .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(quantise(&gpu), quantise(&cpu));
+}
+
+#[test]
 fn gpu_observes_preexisting_and_progress_callback_cancellation() {
     let Some(source) = fixture("gradients.png") else {
         return;
@@ -157,6 +188,10 @@ fn gpu_observes_preexisting_and_progress_callback_cancellation() {
 
 #[test]
 fn optimized_preview_uses_cpu_until_gpu_clipping_reports_have_parity() {
+    if !gpu_tests_enabled() {
+        eprintln!("skipping GPU test: set FOCAL_RUN_GPU_TESTS=1 to run hardware tests");
+        return;
+    }
     let Some(source) = fixture("gradients.png") else {
         return;
     };

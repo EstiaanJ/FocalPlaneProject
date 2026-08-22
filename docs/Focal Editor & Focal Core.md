@@ -34,6 +34,8 @@ The first implementation was deliberately narrow:
 
 The current MVP scope excludes the advanced curve control and response-curve controls. Crop and FocalCore-backed scope analysis were subsequently approved and implemented in Phase One. These GUI scope decisions never permit a second processing pipeline.
 
+The original MVP export is an 8-bit sRGB PNG. The current editor additionally offers 8-bit sRGB JPEG export with a quality slider; PNG remains lossless. Both formats receive the same full-resolution render, and the export worker uses the Optimized executor while retaining the CPU Reference as the parity oracle.
+
 ## Standalone editor
 
 Focal Editor must be usable without FocalLib. Opening one photograph must never require importing it, creating a catalogue, or adopting the photo-management workflow.

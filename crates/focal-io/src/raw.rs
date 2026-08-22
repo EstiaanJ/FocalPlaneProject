@@ -49,6 +49,9 @@ pub fn decode_xt5_thumbnail(
 /// firmware-4.00 Standard JPEG reference.
 pub const XT5_CAMERA_NEUTRAL_VERSION: u32 = 3;
 
+const SRGB_LUT_SIZE: usize = 16_384;
+const SRGB_LUT_MAX: f32 = 4.0;
+
 /// Opaque, display-encoded output from the X-T5 default rendering.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CameraNeutralImage {
@@ -130,6 +133,7 @@ pub fn decode_xt5_camera_neutral(
                 .and_then(|height| width.checked_mul(height))
         })
         .ok_or(RawDecodeError::DimensionsOverflow)?;
+    let srgb_lut = srgb_encode_lut();
     let pixels = (0..expected)
         .into_par_iter()
         .map(|index| {
@@ -140,8 +144,7 @@ pub fn decode_xt5_camera_neutral(
             let output_y = index / crop_area.d.w;
             let sensor_x = crop_area.p.x + output_x;
             let sensor_y = crop_area.p.y + output_y;
-            let pixel =
-                demosaic_xtrans_pixel(&mosaic, raw.width, sensor_x, sensor_y, &cfa, &kernels);
+            let pixel = demosaic_xtrans_pixel(&mosaic, raw.width, sensor_x, sensor_y, &kernels);
             let camera = [
                 pixel[0] * white_balance[0],
                 pixel[1] * white_balance[1],
@@ -159,7 +162,7 @@ pub fn decode_xt5_camera_neutral(
                         + camera_to_rgb[2][1] * camera[1]
                         + camera_to_rgb[2][2] * camera[2],
                 ]
-                .map(srgb_encode),
+                .map(|value| srgb_encode_fast(value, &srgb_lut)),
             ));
             Ok(rendered)
         })
@@ -188,6 +191,30 @@ fn srgb_encode(value: f32) -> f32 {
     } else {
         1.055 * value.powf(1.0 / 2.4) - 0.055
     }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn srgb_encode_lut() -> Vec<f32> {
+    (0..=SRGB_LUT_SIZE)
+        .map(|index| srgb_encode(index as f32 * (SRGB_LUT_MAX / SRGB_LUT_SIZE as f32)))
+        .collect()
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+#[inline]
+fn srgb_encode_fast(value: f32, lut: &[f32]) -> f32 {
+    let value = value.max(0.0);
+    if value >= SRGB_LUT_MAX {
+        return srgb_encode(value);
+    }
+    let position = value * (SRGB_LUT_SIZE as f32 / SRGB_LUT_MAX);
+    let index = position as usize;
+    let fraction = position - index as f32;
+    lut[index] + (lut[index + 1] - lut[index]) * fraction
 }
 
 const CAMERA_NEUTRAL_V2: [[f32; 3]; 10] = [
@@ -276,8 +303,19 @@ struct InterpolationSample {
     weight: f32,
 }
 
-fn xtrans_interpolation_kernels(cfa: &rawler::CFA) -> Vec<Vec<InterpolationSample>> {
-    let mut kernels = Vec::with_capacity(cfa.width * cfa.height * 3);
+#[derive(Clone, Debug)]
+struct XTransInterpolationKernels {
+    width: usize,
+    height: usize,
+    channels: Vec<usize>,
+    samples: Vec<Vec<InterpolationSample>>,
+}
+
+fn xtrans_interpolation_kernels(cfa: &rawler::CFA) -> XTransInterpolationKernels {
+    let channels = (0..cfa.height)
+        .flat_map(|phase_y| (0..cfa.width).map(move |phase_x| cfa.color_at(phase_y, phase_x)))
+        .collect::<Vec<_>>();
+    let mut samples = Vec::with_capacity(cfa.width * cfa.height * 3);
     for phase_y in 0..cfa.height {
         for phase_x in 0..cfa.width {
             for channel in 0..3 {
@@ -293,7 +331,7 @@ fn xtrans_interpolation_kernels(cfa: &rawler::CFA) -> Vec<Vec<InterpolationSampl
                         let y = (i32::try_from(phase_y).unwrap_or(0) + dy)
                             .rem_euclid(i32::try_from(cfa.height).unwrap_or(1))
                             as usize;
-                        if cfa.color_at(y, x) == channel {
+                        if channels[y * cfa.width + x] == channel {
                             let distance_squared = dx * dx + dy * dy;
                             candidates.push((dx, dy, distance_squared));
                         }
@@ -318,11 +356,16 @@ fn xtrans_interpolation_kernels(cfa: &rawler::CFA) -> Vec<Vec<InterpolationSampl
                 for sample in &mut selected {
                     sample.weight /= total_weight;
                 }
-                kernels.push(selected);
+                samples.push(selected);
             }
         }
     }
-    kernels
+    XTransInterpolationKernels {
+        width: cfa.width,
+        height: cfa.height,
+        channels,
+        samples,
+    }
 }
 
 fn demosaic_xtrans_pixel(
@@ -330,23 +373,21 @@ fn demosaic_xtrans_pixel(
     sensor_width: usize,
     x: usize,
     y: usize,
-    cfa: &rawler::CFA,
-    kernels: &[Vec<InterpolationSample>],
+    kernels: &XTransInterpolationKernels,
 ) -> [f32; 3] {
-    let measured_channel = cfa.color_at(y, x);
+    let measured_channel =
+        kernels.channels[(y % kernels.height) * kernels.width + x % kernels.width];
     let measured = mosaic[y * sensor_width + x];
-    let phase = (y % cfa.height) * cfa.width + x % cfa.width;
+    let phase = (y % kernels.height) * kernels.width + x % kernels.width;
     std::array::from_fn(|channel| {
         if channel == measured_channel {
             measured
         } else {
-            kernels[phase * 3 + channel]
+            kernels.samples[phase * 3 + channel]
                 .iter()
                 .map(|sample| {
-                    let sample_x =
-                        usize::try_from(i32::try_from(x).unwrap_or(0) + sample.dx).unwrap_or(x);
-                    let sample_y =
-                        usize::try_from(i32::try_from(y).unwrap_or(0) + sample.dy).unwrap_or(y);
+                    let sample_x = x.saturating_add_signed(sample.dx as isize);
+                    let sample_y = y.saturating_add_signed(sample.dy as isize);
                     mosaic[sample_y * sensor_width + sample_x] * sample.weight
                 })
                 .sum()
@@ -555,6 +596,15 @@ mod tests {
     }
 
     #[test]
+    fn srgb_lookup_stays_close_to_the_reference_transfer() {
+        let lut = srgb_encode_lut();
+        for index in 0..=128 {
+            let value = f32::from(u16::try_from(index).unwrap()) / 32.0;
+            assert!((srgb_encode_fast(value, &lut) - srgb_encode(value)).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
     fn camera_neutral_v2_output_is_bounded() {
         for input in [[0.0; 3], [0.1; 3], [0.5, 0.2, 0.9], [1.0; 3]] {
             assert!(
@@ -589,7 +639,7 @@ mod tests {
         let kernels = xtrans_interpolation_kernels(&cfa);
         for y in 4..14 {
             for x in 4..14 {
-                let pixel = demosaic_xtrans_pixel(&mosaic, width, x, y, &cfa, &kernels);
+                let pixel = demosaic_xtrans_pixel(&mosaic, width, x, y, &kernels);
                 for (actual, expected) in pixel.into_iter().zip(channel_values) {
                     assert!((actual - expected).abs() < 1.0e-6);
                 }

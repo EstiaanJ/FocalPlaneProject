@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     image_io::{
-        self, DecodedImage, ExportRequest, ExportResult, LoadOperation, LoadRequest, LoadResult,
-        Thumbnail, ThumbnailRequest, ThumbnailResult,
+        self, DEFAULT_JPEG_QUALITY, DecodedImage, ExportFormat, ExportRequest, ExportResult,
+        LoadOperation, LoadRequest, LoadResult, Thumbnail, ThumbnailRequest, ThumbnailResult,
     },
     preview::{self, Adjustments, PreviewEvent, PreviewRequest, PreviewSampling, PreviewWorker},
     scope::{self, ScopeRequest, ScopeResult},
@@ -202,6 +202,8 @@ pub struct FocalEditorApp {
     navigator_height: f32,
     histogram_height: f32,
     last_export_directory: Option<PathBuf>,
+    last_export_format: ExportFormat,
+    jpeg_quality: u8,
     status: String,
 }
 
@@ -289,6 +291,8 @@ impl FocalEditorApp {
             navigator_height: 170.0,
             histogram_height: 185.0,
             last_export_directory: None,
+            last_export_format: ExportFormat::Png,
+            jpeg_quality: DEFAULT_JPEG_QUALITY,
             status: "Ready — open a PNG, JPEG, TIFF, or X-T5 RAF to begin".to_owned(),
         };
 
@@ -490,7 +494,9 @@ impl FocalEditorApp {
                 Ok(()) => {
                     self.last_export_directory =
                         result.path.parent().map(std::path::Path::to_path_buf);
-                    self.status = format!("Exported {}", result.path.display());
+                    self.last_export_format = result.format;
+                    let backend = result.backend.map_or("unknown", backend_label);
+                    self.status = format!("Exported {} ({backend})", result.path.display());
                 }
                 Err(error) => {
                     self.status = format!("Could not export {}: {error}", result.path.display());
@@ -850,7 +856,33 @@ impl FocalEditorApp {
         else {
             return;
         };
-        self.export_to_path(&path);
+        self.export_to_path(&path, ExportFormat::Png);
+    }
+
+    fn export_jpeg(&mut self) {
+        if !self.can_export() {
+            self.status = "Wait for the current render before exporting".to_owned();
+            return;
+        }
+        let (Some(source_path), Some(_)) = (self.source_path.as_ref(), self.output.as_ref()) else {
+            self.status = "Render a preview before exporting".to_owned();
+            return;
+        };
+        let default_name = format!(
+            "{}-edited.jpg",
+            source_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("untitled")
+        );
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("JPEG image", &["jpg", "jpeg"])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        self.export_to_path(&path, ExportFormat::jpeg(self.jpeg_quality));
     }
 
     fn export_beside_last(&mut self) {
@@ -860,10 +892,18 @@ impl FocalEditorApp {
         let Some(source_path) = self.source_path.as_ref() else {
             return;
         };
-        self.export_to_path(&default_export_path(directory, source_path));
+        let format = match self.last_export_format {
+            ExportFormat::Png => ExportFormat::Png,
+            ExportFormat::Jpeg { .. } => ExportFormat::jpeg(self.jpeg_quality),
+        };
+        let mut path = default_export_path(directory, source_path);
+        if format != ExportFormat::Png {
+            path.set_extension(format.extension());
+        }
+        self.export_to_path(&path, format);
     }
 
-    fn export_to_path(&mut self, path: &std::path::Path) {
+    fn export_to_path(&mut self, path: &std::path::Path, format: ExportFormat) {
         if !self.can_export() {
             self.status = "Wait for the current render before exporting".to_owned();
             return;
@@ -873,6 +913,7 @@ impl FocalEditorApp {
             return;
         };
         let source = (**source).clone();
+        let path = export_path_with_format(path, format);
         self.status = "Rendering full-resolution export…".to_owned();
         self.invalidate_export();
         let cancellation = CancellationToken::new();
@@ -883,7 +924,8 @@ impl FocalEditorApp {
             .export_sender
             .send(ExportRequest {
                 generation: self.latest_generation,
-                path: path.to_path_buf(),
+                path,
+                format,
                 source,
                 snapshot: preview::snapshot_with_adjustments(self.adjustments()),
                 cancellation,
@@ -1047,10 +1089,17 @@ impl FocalEditorApp {
         }
         if left
             .add_enabled(self.can_export(), egui::Button::new("Export"))
-            .on_hover_text("Render the current preview to an 8-bit sRGB PNG")
+            .on_hover_text("Render the current image to an 8-bit sRGB PNG")
             .clicked()
         {
             self.export_png();
+        }
+        if left
+            .add_enabled(self.can_export(), egui::Button::new("JPEG"))
+            .on_hover_text("Export an 8-bit sRGB JPEG using the quality slider")
+            .clicked()
+        {
+            self.export_jpeg();
         }
         if left
             .add_enabled(
@@ -1157,6 +1206,18 @@ impl FocalEditorApp {
         ui.label(egui::RichText::new("No saved presets yet").small().weak());
         ui.label(
             egui::RichText::new("Presets will remain separate from photo-specific edit state.")
+                .small()
+                .weak(),
+        );
+        ui.separator();
+        ui.heading("Export");
+        ui.add(
+            egui::Slider::new(&mut self.jpeg_quality, 1..=100)
+                .text("JPEG quality")
+                .clamping(egui::SliderClamping::Always),
+        );
+        ui.label(
+            egui::RichText::new(format!("{}% · PNG remains lossless", self.jpeg_quality))
                 .small()
                 .weak(),
         );
@@ -3191,6 +3252,20 @@ fn default_export_path(directory: &std::path::Path, source_path: &std::path::Pat
     directory.join(format!("{stem}-edited.png"))
 }
 
+fn export_path_with_format(path: &std::path::Path, format: ExportFormat) -> PathBuf {
+    let mut path = path.to_path_buf();
+    path.set_extension(format.extension());
+    path
+}
+
+const fn backend_label(backend: focal_core::OptimizedBackend) -> &'static str {
+    match backend {
+        focal_core::OptimizedBackend::Cpu => "Optimized CPU",
+        #[cfg(feature = "gpu")]
+        focal_core::OptimizedBackend::Gpu => "GPU",
+    }
+}
+
 fn configure_visuals(context: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = PANEL_BACKGROUND;
@@ -4022,6 +4097,24 @@ mod tests {
                 std::path::Path::new("/photos/frame.jpg"),
             ),
             PathBuf::from("/exports/frame-edited.png")
+        );
+    }
+
+    #[test]
+    fn export_path_uses_the_selected_format_extension() {
+        assert_eq!(
+            export_path_with_format(
+                std::path::Path::new("/exports/frame.png"),
+                ExportFormat::jpeg(88),
+            ),
+            PathBuf::from("/exports/frame.jpg")
+        );
+        assert_eq!(
+            export_path_with_format(
+                std::path::Path::new("/exports/frame.jpg"),
+                ExportFormat::Png,
+            ),
+            PathBuf::from("/exports/frame.png")
         );
     }
 

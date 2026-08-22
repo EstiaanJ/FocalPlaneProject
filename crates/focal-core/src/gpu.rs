@@ -281,91 +281,92 @@ impl GpuPipeline {
             return Err(cancelled_gpu_render());
         }
 
-        let mut input = Vec::with_capacity(image.pixels().len());
-        for chunk in image.pixels().chunks(2_048) {
+        let max_chunk_pixels = self.max_chunk_pixels()?;
+        let mut buffers = self.buffers.lock().map_err(|_| GpuError::ResourceLock)?;
+        let mut pixels = Vec::with_capacity(image.pixels().len());
+        for source_chunk in image.pixels().chunks(max_chunk_pixels) {
+            let mut input = Vec::with_capacity(source_chunk.len());
+            for small_chunk in source_chunk.chunks(2_048) {
+                if cancellation.is_cancelled() {
+                    return Err(cancelled_gpu_render());
+                }
+                input.extend(
+                    small_chunk
+                        .iter()
+                        .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0]),
+                );
+            }
+            let input_len = u32::try_from(input.len()).map_err(|_| GpuError::BufferSizeOverflow)?;
+            let output_size = pixel_buffer_size(input.len())?;
+            if buffers
+                .as_ref()
+                .is_none_or(|buffers| buffers.pixel_capacity < input.len())
+            {
+                *buffers = Some(GpuBuffers::new(&self.device, &self.layout, input.len())?);
+            }
+            let buffers = buffers.as_mut().ok_or(GpuError::ResourceLock)?;
+            self.queue
+                .write_buffer(&buffers.input, 0, cast_slice(&input));
+            let mut block = parameters.block;
+            block.execution[0] = input_len;
+            self.queue
+                .write_buffer(&buffers.parameters, 0, bytes_of(&block));
             if cancellation.is_cancelled() {
                 return Err(cancelled_gpu_render());
             }
-            input.extend(
-                chunk
-                    .iter()
-                    .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0]),
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("focal-core-gpu-command-encoder"),
+                });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("focal-core-gpu-pointwise-pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.compute);
+                pass.set_bind_group(0, &buffers.bind_group, &[]);
+                let groups = input_len.div_ceil(WORKGROUP_SIZE);
+                pass.dispatch_workgroups(groups, 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(&buffers.output, 0, &buffers.readback, 0, output_size);
+            let submission = self.queue.submit([encoder.finish()]);
+
+            let output_slice = buffers.readback.slice(..output_size);
+            let (sender, receiver) = mpsc::channel();
+            output_slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+            let mut cancelled = false;
+            loop {
+                match self.device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission.clone()),
+                    timeout: Some(Duration::from_millis(10)),
+                }) {
+                    Ok(_) => break,
+                    Err(wgpu::PollError::Timeout) => {
+                        cancelled |= cancellation.is_cancelled();
+                    }
+                    Err(error) => return Err(GpuError::DevicePoll(error.to_string())),
+                }
+            }
+            receiver
+                .recv()
+                .map_err(|error| GpuError::Readback(error.to_string()))?
+                .map_err(|error| GpuError::Readback(error.to_string()))?;
+            let mapped = output_slice.get_mapped_range();
+            let output = cast_slice::<u8, [f32; 4]>(&mapped).to_vec();
+            drop(mapped);
+            buffers.readback.unmap();
+            if cancelled || cancellation.is_cancelled() {
+                return Err(cancelled_gpu_render());
+            }
+            pixels.extend(
+                output
+                    .into_iter()
+                    .map(|pixel| [pixel[0], pixel[1], pixel[2]]),
             );
         }
-        let output_size = pixel_buffer_size(input.len())?;
-        let mut buffers = self.buffers.lock().map_err(|_| GpuError::ResourceLock)?;
-        if buffers
-            .as_ref()
-            .is_none_or(|buffers| buffers.pixel_capacity < input.len())
-        {
-            let pixel_capacity = input
-                .len()
-                .checked_next_power_of_two()
-                .ok_or(GpuError::BufferSizeOverflow)?;
-            *buffers = Some(GpuBuffers::new(&self.device, &self.layout, pixel_capacity)?);
-        }
-        let buffers = buffers.as_mut().ok_or(GpuError::ResourceLock)?;
-        self.queue
-            .write_buffer(&buffers.input, 0, cast_slice(&input));
-        self.queue
-            .write_buffer(&buffers.parameters, 0, bytes_of(&parameters.block));
-        if cancellation.is_cancelled() {
-            return Err(cancelled_gpu_render());
-        }
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("focal-core-gpu-command-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("focal-core-gpu-pointwise-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.compute);
-            pass.set_bind_group(0, &buffers.bind_group, &[]);
-            let groups = u32::try_from(input.len())
-                .map_err(|_| GpuError::BufferSizeOverflow)?
-                .div_ceil(WORKGROUP_SIZE);
-            pass.dispatch_workgroups(groups, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(&buffers.output, 0, &buffers.readback, 0, output_size);
-        let submission = self.queue.submit([encoder.finish()]);
-
-        let output_slice = buffers.readback.slice(..output_size);
-        let (sender, receiver) = mpsc::channel();
-        output_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        let mut cancelled = false;
-        loop {
-            match self.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission.clone()),
-                timeout: Some(Duration::from_millis(10)),
-            }) {
-                Ok(_) => break,
-                Err(wgpu::PollError::Timeout) => {
-                    cancelled |= cancellation.is_cancelled();
-                }
-                Err(error) => return Err(GpuError::DevicePoll(error.to_string())),
-            }
-        }
-        receiver
-            .recv()
-            .map_err(|error| GpuError::Readback(error.to_string()))?
-            .map_err(|error| GpuError::Readback(error.to_string()))?;
-        let mapped = output_slice.get_mapped_range();
-        let output = cast_slice::<u8, [f32; 4]>(&mapped).to_vec();
-        drop(mapped);
-        buffers.readback.unmap();
-        if cancelled || cancellation.is_cancelled() {
-            return Err(cancelled_gpu_render());
-        }
-
-        let pixels = output
-            .into_iter()
-            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
-            .collect();
         let result = Image::new(
             image.width(),
             image.height(),
@@ -392,6 +393,28 @@ impl GpuPipeline {
                 clipping: None,
             },
         ))
+    }
+
+    fn max_chunk_pixels(&self) -> Result<usize, GpuError> {
+        let max_bytes = usize::try_from(self.device.limits().max_storage_buffer_binding_size)
+            .map_err(|_| GpuError::BufferSizeOverflow)?;
+        let pixels = max_bytes
+            .checked_div(std::mem::size_of::<[f32; 4]>())
+            .and_then(|pixels| pixels.checked_div(2))
+            .ok_or(GpuError::BufferSizeOverflow)?;
+        let max_dispatch_groups =
+            usize::try_from(self.device.limits().max_compute_workgroups_per_dimension)
+                .map_err(|_| GpuError::BufferSizeOverflow)?;
+        let max_dispatch_pixels = usize::try_from(WORKGROUP_SIZE)
+            .ok()
+            .and_then(|size| size.checked_mul(max_dispatch_groups))
+            .ok_or(GpuError::BufferSizeOverflow)?;
+        let pixels = pixels.min(max_dispatch_pixels);
+        if pixels == 0 {
+            Err(GpuError::BufferSizeOverflow)
+        } else {
+            Ok(pixels)
+        }
     }
 }
 
