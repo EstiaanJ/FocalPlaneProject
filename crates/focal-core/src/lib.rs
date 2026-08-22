@@ -6,8 +6,11 @@
 
 mod curve;
 mod execution;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 mod image;
 mod module;
+mod optimized;
 mod pipeline;
 mod processing;
 pub mod scope;
@@ -23,6 +26,7 @@ pub use image::{
     ChannelMeaning, ColourEncoding, Image, ImageContract, ImageError, Primaries, WhitePoint,
 };
 pub use module::{CropSettings, Module, ModuleKind, ModuleParameters};
+pub use optimized::{OptimizedBackend, OptimizedPipeline, OptimizedPipelineError};
 pub use pipeline::{
     ClippingWarnings, PIPELINE_VERSION, Pipeline, PipelineError, PipelineSnapshot, RenderReport,
     RenderStageReport, RenderStageStatus, WorkingSpace,

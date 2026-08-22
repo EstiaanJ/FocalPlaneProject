@@ -14,9 +14,29 @@ Use unit, integration, contract, end-to-end, and manual testing. Write tests fir
 
 Aim for high test coverage while prioritising meaningful assertions, edge cases, failure paths, and regressions over the percentage alone. Human visual and interaction evaluation is a required testing vector, especially for GUI behaviour and perceived image quality, but it complements rather than replaces automated testing. See [[Engineering Principles]].
 
-The mostly single-threaded CPU implementation should remain a readable reference against which GPU acceleration and CPU multithreading can be checked.
+The mostly single-threaded CPU Reference implementation should remain readable. The separate Optimized executor contains CPU multithreading and GPU acceleration and is always checked against Reference output.
 
 The CPU reference defines correct [[Focal Core Pipeline|ordered pipeline]] results, not the only permitted scheduling or caching strategy. Preview caches and accelerated implementations must not change module order or processing semantics.
+
+`cargo test -p focal-core --test optimized_pipeline` verifies the optimized CPU
+path independently, including snapshots which the GPU cannot yet execute. GPU
+execution is opt-in and must remain a separately measured implementation of
+the same contracts. `cargo test -p focal-core --features gpu --test gpu_pipeline`
+compares the GPU output and stage report with the CPU reference on the main
+`test-image` fixtures, checks finite display-bounded output, and runs a
+hardware-tolerant catastrophic-regression smoke gate. Use the release benchmark
+example to record the Reference/optimized-CPU/GPU ratios; do not turn one
+machine's core count or transfer overhead into a universal speed requirement.
+On a validation machine with the fixtures and a usable adapter, set
+`FOCAL_REQUIRE_GPU_TESTS=1` so an unavailable adapter or missing fixture is a
+failure. Ordinary clean-clone testing may still skip hardware-dependent GPU
+execution while compiling the GPU implementation.
+
+The benchmark prepares owned CPU inputs before timing so image cloning does not
+inflate Reference or Optimized CPU execution relative to borrowed GPU input.
+The optimized CPU smoke gate can be tightened on a stable target with
+`FOCAL_OPTIMIZED_CPU_MAX_SLOWDOWN`; it remains a catastrophic-regression check,
+not a claim that one machine's timing is universal.
 
 ## Controlled fixtures
 
@@ -97,6 +117,10 @@ Before merging processing, file-boundary, or editor work, verify:
 - [ ] The manual visual and interaction check is recorded and performed where behaviour is visible.
 
 Correct cancellation is not enough by itself: measure the **150 ms** target on the target system with a repeatable benchmark or performance test.
+
+Use [[Accelerated Rendering Visual Checklist]] for the required human review of
+GPU and parallel rendering. Record the adapter, build, fixtures, zoom levels,
+and result; an unchecked checklist is not evidence that review occurred.
 
 ## Review records
 

@@ -159,6 +159,28 @@ Preview policy prioritises interactive speed while preserving the global appeara
 
 Zoom does not remove this bound. The editor selects the corresponding source-image region and resamples that region towards the physical pixel dimensions of the preview, subject to the current cap and using source pixels up to a native display ratio of 1:1 where available. Images smaller than the preview are processed at their original dimensions and enlarged for presentation with nearest-neighbour sampling; they must not be upsampled before adjustment processing.
 
+## Reference and optimized execution
+
+FocalCore has two executable implementations of its one ordered processing architecture. `Pipeline` is the deliberately readable, mostly single-threaded CPU Reference implementation and remains the correctness oracle. `OptimizedPipeline` is the production-acceleration implementation: work which must remain on the CPU may use multithreading and specialized kernels, and the optional `focal-core/gpu` feature may execute a supported complete snapshot through `wgpu`. These are runtime paths, not Git branches or separate processing architectures.
+
+New processing features enter the Reference implementation on the main development branch first. After that work is merged into the acceleration branch, the Optimized implementation may accelerate it against retained Reference parity tests. Optimized execution must not change module order, colour meaning, or parameters. It must report the backend it actually used.
+
+The optimized executor prefers the GPU only when the complete snapshot is supported. Otherwise it runs the Optimized CPU executor; it does not call `Pipeline::render` as a hidden fallback. While that implementation is being built, an unaccelerated stage may explicitly delegate to its proven Reference kernel as temporary scaffolding. Such delegation must be named in code and documentation, retain parity coverage, and be replaced stage by stage. Do not copy a Reference kernel merely to make the source trees look separate.
+
+Connectors and interfaces to external libraries which already perform the substantive accelerated work are the exception: one shared, thin Reference implementation is sufficient when profiling shows that project-owned code is not the bottleneck. Keep those shared boundaries distinct from processing kernels so this exception cannot blur the Reference and Optimized implementations.
+
+A GPU selected for a render must surface device or transfer failures rather than silently changing backend. GPU initialization failure may select Optimized CPU, but the diagnostic must remain inspectable. Avoid repeated CPU-to-GPU round trips between stages unless profiling demonstrates that a deliberately segmented plan is faster and parity tests cover the boundaries.
+
+The optional `focal-core/gpu` feature provides a `wgpu` compute path for the currently point-wise subset of the ordered pipeline. It must be judged against the Reference result on the top-level `test-image` fixtures, with explicit numerical tolerances and a repeatable benchmark.
+
+The first GPU path accelerates input/output transforms, exposure, and white balance while preserving the existing no-op placeholder stages. It rejects crop, non-zero local contrast, noise reduction, saturation, contrast, and non-identity tonal curves until their neighbourhood, reduction, or lookup-table kernels have independent parity tests. It must never silently substitute a second processing architecture or approximate an unsupported stage.
+
+Run CPU parity with `cargo test -p focal-core --test optimized_pipeline` and GPU parity and smoke tests with `cargo test -p focal-core --features gpu --test gpu_pipeline`. Set `FOCAL_REQUIRE_GPU_TESTS=1` on GPU-capable validation machines so missing fixtures or adapters fail instead of skipping. Compare Reference, optimized CPU, and GPU performance with the `benchmark_pipeline` example in release mode on the target machine. Timed backend execution excludes input cloning on every path. Smoke tests catch catastrophic regressions; the benchmark records actual ratios because image size, thread count, transfer overhead, and adapter performance are hardware-dependent.
+
+Current temporary Optimized CPU scaffolding delegates Contrast, Local Contrast, decoded-image Noise Reduction, and Crop to the proven Reference kernels. Input/output transforms, White Balance, Exposure, production Tonal Curves, and Saturation have distinct parallel implementations. This list must be updated whenever a stage moves across the boundary.
+
+GPU execution currently accepts Export quality only. Preview routes through Optimized CPU until the GPU can produce the required pre-output clipping report with parity; this is a quality-contract limitation, not a performance policy.
+
 ## Saved edit state
 
 Prototype sidecars store all editing parameters required to reproduce the edit. Adjustments are stored as **absolute values**, not offsets from preset values.

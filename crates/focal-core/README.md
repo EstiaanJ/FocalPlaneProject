@@ -1,6 +1,9 @@
 # Focal Core
 
-`focal-core` is the GUI-independent CPU reference pipeline for FocalPlane.
+`focal-core` is FocalPlane's GUI-independent processing engine. `Pipeline` is
+the readable CPU reference and correctness oracle. `OptimizedPipeline` is the
+separate production-acceleration executor for multithreaded CPU and optional
+GPU work; both execute the same ordered pipeline snapshots.
 It currently establishes the image contract, serialisable module parameters,
 immutable pipeline snapshots, the documented default order, and contract
 checks at processing boundaries.
@@ -10,6 +13,33 @@ Rendering can use `Pipeline::render_with_context` with a cloneable
 quality. The quality modes currently have identical semantics until a preview
 approximation is defined and approved. The compatibility `render` method uses
 the export mode and discards progress.
+
+The optional `gpu` feature lets `OptimizedPipeline::new()` prefer the GPU when
+the complete snapshot is supported. `OptimizedPipeline::cpu_only()` selects
+the Rayon-backed CPU implementation explicitly. The lower-level
+`focal_core::gpu::GpuPipeline` is also exposed. It is a
+`wgpu` compute path for the point-wise subset of the ordered pipeline; the CPU
+renderer remains the reference and unsupported spatial stages are rejected.
+
+The Optimized CPU path currently uses distinct parallel implementations for
+input/output transforms, white balance, exposure, tonal curves, and saturation.
+Contrast, local contrast, decoded-image noise reduction, and crop explicitly use
+their Reference kernels as temporary scaffolding while equivalent accelerated
+kernels and their parity tests are developed. Thin connectors to already
+accelerated external libraries may remain shared permanently.
+
+Compare all execution paths with:
+
+```sh
+cargo run --release --features gpu --example benchmark_pipeline -p focal-core -- test-image/radial_mtf.png
+```
+Parity and performance checks use the top-level `test-image` fixtures:
+
+```sh
+cargo test -p focal-core --features gpu --test gpu_pipeline
+FOCAL_REQUIRE_GPU_TESTS=1 cargo test -p focal-core --features gpu --test gpu_pipeline
+cargo run --release --features gpu --example benchmark_pipeline -p focal-core -- test-image/radial_mtf.png
+```
 
 The target architecture is documented in `../../docs/Architecture Decisions.md` and `../../docs/Clean Architecture Migration.md`. FocalCore owns the one production processing architecture; the planned `focal-io` crate owns decoding, profile interpretation, orientation, metadata, alpha handling, and encoding. Experimental applications must not become competing production pipelines.
 

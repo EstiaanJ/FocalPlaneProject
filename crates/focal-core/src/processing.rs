@@ -4,6 +4,8 @@
     clippy::cast_sign_loss
 )]
 
+use rayon::prelude::*;
+
 use crate::{ADOBE_RGB_LUMA_COEFFICIENTS, CancellationToken, Image};
 const ADOBE_GAMMA: f32 = 2.199_218_8;
 
@@ -36,6 +38,39 @@ pub(crate) fn white_balance(
         }
     }
     Ok(())
+}
+
+pub(crate) fn white_balance_optimized(
+    image: &mut Image,
+    warmth: f32,
+    tint: f32,
+    cancellation: &CancellationToken,
+) -> Result<(), ()> {
+    let warm_gain = 2.0_f32.powf(warmth / 100.0);
+    let tint_gain = 2.0_f32.powf(tint / 200.0);
+    let mut gains = [
+        warm_gain * tint_gain,
+        1.0 / tint_gain,
+        tint_gain / warm_gain,
+    ];
+    let neutral_luma = luma(gains);
+    for gain in &mut gains {
+        *gain /= neutral_luma;
+    }
+    image
+        .pixels_mut()
+        .par_chunks_mut(2_048)
+        .try_for_each(|chunk| {
+            if cancellation.is_cancelled() {
+                return Err(());
+            }
+            for pixel in chunk {
+                for (channel, gain) in pixel.iter_mut().zip(gains) {
+                    *channel *= gain;
+                }
+            }
+            Ok(())
+        })
 }
 
 pub(crate) fn local_contrast(
@@ -194,6 +229,36 @@ pub(crate) fn saturation(
         *pixel = hsv_to_rgb(hue, saturation, value);
     }
     Ok(())
+}
+
+pub(crate) fn saturation_optimized(
+    image: &mut Image,
+    amount: f32,
+    cancellation: &CancellationToken,
+) -> Result<(), ()> {
+    if amount == 0.0 {
+        return Ok(());
+    }
+    let adjustment = amount / 100.0;
+    image
+        .pixels_mut()
+        .par_chunks_mut(2_048)
+        .try_for_each(|chunk| {
+            if cancellation.is_cancelled() {
+                return Err(());
+            }
+            for pixel in chunk {
+                let (hue, mut saturation, value) = rgb_to_hsv(*pixel);
+                if adjustment > 0.0 {
+                    let protected_target = 1.0 - (1.0 - saturation.min(1.0)).powi(4);
+                    saturation = lerp(saturation, protected_target, adjustment);
+                } else {
+                    saturation *= 1.0 + adjustment;
+                }
+                *pixel = hsv_to_rgb(hue, saturation, value);
+            }
+            Ok(())
+        })
 }
 
 fn encoded_pixels(image: &Image) -> Vec<[f32; 3]> {

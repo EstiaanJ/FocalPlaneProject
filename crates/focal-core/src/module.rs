@@ -1,7 +1,9 @@
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CancellationToken, CurveMode, CurveSet, Image, ImageContract, WorkingSpace, processing,
+    CancellationToken, CurveMode, CurveSet, Image, ImageContract, WorkingSpace,
+    pipeline::RenderImplementation, processing,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +132,21 @@ pub struct Module {
 }
 
 impl Module {
+    pub(crate) fn apply_with_implementation(
+        &self,
+        image: &mut Image,
+        working_space: WorkingSpace,
+        cancellation: &CancellationToken,
+        implementation: RenderImplementation,
+    ) -> Result<(), ()> {
+        match implementation {
+            RenderImplementation::Reference => self.apply(image, working_space, cancellation),
+            RenderImplementation::OptimizedCpu => {
+                self.apply_optimized(image, working_space, cancellation)
+            }
+        }
+    }
+
     #[must_use]
     pub const fn kind(&self) -> ModuleKind {
         match self.parameters {
@@ -219,6 +236,79 @@ impl Module {
                     *pixel = linear_srgb.map(|value| linear_to_srgb(value).clamp(0.0, 1.0));
                 }
                 image.set_contract(ImageContract::SRGB_DISPLAY);
+            }
+            ModuleParameters::OrientationAndCrop { crop } => {
+                if let Some(crop) = crop {
+                    apply_crop(image, crop, cancellation)?;
+                }
+            }
+            ModuleParameters::HighlightsAndShadows
+            | ModuleParameters::CreativeColour
+            | ModuleParameters::Sharpening
+            | ModuleParameters::Resize
+            | ModuleParameters::QuantisationAndDither => {}
+        }
+        Ok(())
+    }
+
+    fn apply_optimized(
+        &self,
+        image: &mut Image,
+        working_space: WorkingSpace,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        match self.parameters {
+            ModuleParameters::InputTransform => {
+                let source_contract = image.contract();
+                parallel_pixels(image, cancellation, |pixel| {
+                    *pixel = if source_contract == ImageContract::SRGB_DISPLAY {
+                        linear_srgb_to_adobe_rgb(pixel.map(srgb_to_linear))
+                    } else {
+                        pixel.map(adobe_rgb_to_linear)
+                    };
+                })?;
+                image.set_contract(working_space.image_contract());
+            }
+            ModuleParameters::WhiteBalance { warmth, tint } => {
+                processing::white_balance_optimized(image, warmth, tint, cancellation)?;
+            }
+            ModuleParameters::Exposure { stops } => {
+                let gain = stops.exp2();
+                parallel_pixels(image, cancellation, |pixel| {
+                    for value in pixel {
+                        *value *= gain;
+                    }
+                })?;
+            }
+            ModuleParameters::TonalCurve { ref curves, mode } => {
+                parallel_pixels(image, cancellation, |pixel| {
+                    let encoded = pixel.map(linear_to_adobe_rgb);
+                    *pixel = curves.apply(mode, encoded).map(adobe_rgb_to_linear);
+                })?;
+            }
+            ModuleParameters::OutputTransform => {
+                parallel_pixels(image, cancellation, |pixel| {
+                    let linear_srgb = linear_adobe_rgb_to_srgb(*pixel);
+                    *pixel = linear_srgb.map(|value| linear_to_srgb(value).clamp(0.0, 1.0));
+                })?;
+                image.set_contract(ImageContract::SRGB_DISPLAY);
+            }
+            ModuleParameters::Saturation { amount } => {
+                processing::saturation_optimized(image, amount, cancellation)?;
+            }
+            // These stages retain their proven implementation until their
+            // parallel kernels have independent parity and cancellation tests.
+            ModuleParameters::Contrast { amount } => {
+                processing::contrast(image, amount, cancellation)?;
+            }
+            ModuleParameters::LocalContrast { amount, radius } => {
+                processing::local_contrast(image, amount, radius, cancellation)?;
+            }
+            ModuleParameters::NoiseReduction { luminance, colour } => {
+                processing::noise_reduction(image, luminance, colour, cancellation)?;
             }
             ModuleParameters::OrientationAndCrop { crop } => {
                 if let Some(crop) = crop {
@@ -338,6 +428,25 @@ impl Module {
             Err("crop rectangle extends beyond the original image after rotation")
         }
     }
+}
+
+fn parallel_pixels(
+    image: &mut Image,
+    cancellation: &CancellationToken,
+    operation: impl Fn(&mut [f32; 3]) + Sync + Send,
+) -> Result<(), ()> {
+    image
+        .pixels_mut()
+        .par_chunks_mut(2_048)
+        .try_for_each(|chunk| {
+            if cancellation.is_cancelled() {
+                return Err(());
+            }
+            for pixel in chunk {
+                operation(pixel);
+            }
+            Ok(())
+        })
 }
 
 fn validate_crop(crop: CropSettings) -> Result<(), &'static str> {

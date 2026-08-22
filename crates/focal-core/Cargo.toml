@@ -5,11 +5,20 @@ edition.workspace = true
 description = "CPU reference image-processing pipeline for FocalPlane"
 license = "MIT"
 
+[features]
+default = []
+gpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
+
 [dependencies]
 serde.workspace = true
+rayon.workspace = true
+bytemuck = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+image.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

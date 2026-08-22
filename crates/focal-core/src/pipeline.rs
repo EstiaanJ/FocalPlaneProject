@@ -7,6 +7,12 @@ use crate::{
     RenderProgress, RenderQuality,
 };
 
+#[derive(Clone, Copy)]
+pub(crate) enum RenderImplementation {
+    Reference,
+    OptimizedCpu,
+}
+
 pub const PIPELINE_VERSION: u32 = 3;
 
 /// Scene-linear RGB space used by processing modules.
@@ -124,9 +130,34 @@ impl Pipeline {
     /// contract, output, or cancellation state is invalid.
     pub fn render_with_context<P: ProgressReporter>(
         &self,
+        image: Image,
+        context: &RenderContext,
+        progress: &mut P,
+    ) -> Result<(Image, RenderReport), PipelineError> {
+        self.render_with_implementation(image, context, progress, RenderImplementation::Reference)
+    }
+
+    pub(crate) fn render_optimized_with_context<P: ProgressReporter>(
+        &self,
+        image: Image,
+        context: &RenderContext,
+        progress: &mut P,
+    ) -> Result<(Image, RenderReport), PipelineError> {
+        self.render_with_implementation(
+            image,
+            context,
+            progress,
+            RenderImplementation::OptimizedCpu,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn render_with_implementation<P: ProgressReporter>(
+        &self,
         mut image: Image,
         context: &RenderContext,
         progress: &mut P,
+        implementation: RenderImplementation,
     ) -> Result<(Image, RenderReport), PipelineError> {
         if self.snapshot.version != PIPELINE_VERSION {
             return Err(PipelineError::UnsupportedPipelineVersion {
@@ -193,7 +224,12 @@ impl Pipeline {
                 clipping = Some(ClippingWarnings::from_image(&image));
             }
             module
-                .apply(&mut image, self.snapshot.working_space, &cancellation)
+                .apply_with_implementation(
+                    &mut image,
+                    self.snapshot.working_space,
+                    &cancellation,
+                    implementation,
+                )
                 .map_err(|()| cancellation_error(Some(module.kind()), Some(module_index)))?;
             if cancellation.is_cancelled() {
                 return Err(cancellation_error(Some(module.kind()), Some(module_index)));
@@ -232,7 +268,7 @@ impl Pipeline {
         Ok((image, RenderReport { stages, clipping }))
     }
 
-    fn validate_modules(&self) -> Result<(), PipelineError> {
+    pub(crate) fn validate_modules(&self) -> Result<(), PipelineError> {
         for (module_index, module) in self.snapshot.modules.iter().enumerate() {
             module
                 .validate()

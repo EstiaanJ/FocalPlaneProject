@@ -24,6 +24,7 @@ Start with [[FocalPlane]] for the purpose, values, application boundaries, and i
 - [[FocalLib]] — later library-management workflow
 - [[Testing]] — correctness and reproducibility
 - [[RAW Rendering Reference Capture]] — a human test guide for paired RAW and camera-JPEG references
+- [[Accelerated Rendering Visual Checklist]] — human parity and artefact checks for optimized CPU and GPU rendering
 - [[Engineering Principles]] — development standards and human-directed decisions
 - [[Vectorscope Research]] — darktable-inspired colour-scope algorithm and visual design
 - [[Bug Report]] — confirmed defects and executable regression tests
