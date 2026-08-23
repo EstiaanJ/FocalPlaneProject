@@ -1,10 +1,10 @@
-# Exposure Curve Tool
+# FocalCurve
 
 This sub-project is an experimental GUI for getting the curve interaction right before it is integrated into Focal Editor. Prioritise rapid visual iteration, clear image-processing semantics, and a polished control over adding unrelated editor features.
 
-The canonical name is **FocalCurve** and the eventual Rust package/folder name is `focal-curve`. Keep this application independently runnable as a visual test harness while designing its curve editor as a reusable widget.
+Keep this application independently runnable as a visual test harness while designing its curve editor as a reusable widget.
 
-The current directory contains `cruve` as a historical spelling mistake. Use **curve** consistently in code, UI text, documentation, crate metadata, and new filenames. Do not rename the directory as part of unrelated work.
+Use **curve** consistently in code, UI text, documentation, crate metadata, and filenames.
 
 ## Prototype layout
 

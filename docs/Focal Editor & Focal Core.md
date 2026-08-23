@@ -38,6 +38,8 @@ The export dialog can reuse the complete settings from the last successful expor
 
 The current layout places Histograms, CIE 1931, and RYB scopes in the left rail, with presets below them. The Navigator has been removed. The right rail contains foldable Crop, Display Aids, White Balance, Tone, Local Contrast, Colour, and Noise Reduction sections above the fixed processing bar.
 
+Scope analysis remains delegated to FocalCore; the reusable background scope worker and egui `ScopeWidget` are provided by the `focal-plot` crate rather than being editor-owned code.
+
 ## Standalone editor
 
 Focal Editor must be usable without FocalLib. Opening one photograph must never require importing it, creating a catalogue, or adopting the photo-management workflow.

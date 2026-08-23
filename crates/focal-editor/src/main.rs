@@ -3,7 +3,6 @@
 mod app;
 mod image_io;
 mod preview;
-mod scope;
 
 use app::FocalEditorApp;
 

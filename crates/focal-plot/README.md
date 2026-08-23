@@ -1,8 +1,8 @@
-# Better Plots
+# FocalPlot
 
 A standalone egui/eframe experiment for FocalPlane plotting tools.
 
-Its canonical project name is **FocalPlot** and its eventual package/folder name is `focal-plot`. The current app remains a standalone harness as well as the proving ground for reusable scope widgets.
+The app remains a standalone harness as well as the proving ground for reusable scope widgets. The public `scope` and `scope_widget` modules provide the background worker and reusable egui scope widget used by Focal Editor.
 
 The current prototype places a tabbed colour scope on the left half of the window and a loaded image on the right. The default tab is a CIE 1931 xy chromaticity plot with a black grid and coloured spectral-locus outline; the RYB vectorscope remains available beside it. Both follow the visual research in `../../docs/Vectorscope Research.md`.
 
@@ -15,7 +15,7 @@ This Rust implementation preserves that lineage while separating analysis from G
 ## Run
 
 ```text
-cargo run
+cargo run -p focal-plot
 ```
 
 Use **Open image…** to load a PNG or JPEG. Image decoding and vectorscope analysis run away from the UI thread. The initial scope analyses the decoded sRGB preview and is intentionally not presented as RAW or scene-referred data.
@@ -23,7 +23,7 @@ Use **Open image…** to load a PNG or JPEG. Image decoding and vectorscope anal
 An image path may be supplied for repeatable visual testing:
 
 ```text
-cargo run -- ../../test-image/pure_chroma.png
+cargo run -p focal-plot -- test-image/pure_chroma.png
 ```
 
 The prototype currently assumes decoded pixel values are sRGB. It does not yet interpret arbitrary embedded ICC profiles, and the UI labels that limitation explicitly.
@@ -43,5 +43,7 @@ The planned `focal-io` crate will eventually own decoding, profiles, orientation
 ## Code layout
 
 - `src/app.rs` — egui layout and rendering.
+- `src/scope.rs` — reusable background scope analysis worker.
+- `src/scope_widget.rs` — reusable egui scope presentation widget.
 - `src/loader.rs` — background image decoding and analysis requests.
 - `src/vectorscope.rs` — GUI-independent RYB/CIE 1931 mapping, density analysis, bilinear trace generation, reverse highlighting, and numerical tests.

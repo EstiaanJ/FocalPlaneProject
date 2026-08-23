@@ -14,7 +14,7 @@ use eframe::egui::{
 };
 
 use crate::loader::{AnalysisKind, ImageLoader, LoadEvent, LoadedImage};
-use better_plots::vectorscope::{
+use focal_plot::vectorscope::{
     AnalysisRegion, DensityScale, ScopeSpace, VectorscopeAnalysis, render_trace, ring_colour,
 };
 

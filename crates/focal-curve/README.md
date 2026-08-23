@@ -1,13 +1,13 @@
-# Exposure Curve Tool
+# FocalCurve
 
-This is a small Rust/egui prototype for refining the exposure-curve interaction before it becomes a Focal Editor widget. The directory name is retained for compatibility, but the project, crate, UI, and documentation use **curve**.
+This is a small Rust/egui prototype for refining the exposure-curve interaction before it becomes a Focal Editor widget.
 
-Its canonical project name is **FocalCurve** and its eventual package/folder name is `focal-curve`. The current app remains a standalone harness as well as the proving ground for a reusable widget.
+The app remains a standalone harness as well as the proving ground for a reusable widget.
 
 ## Run it
 
 ```text
-cargo run
+cargo run -p focal-curve
 ```
 
 The build script creates a deterministic 320 × 192, 16-bit RGB PNG with an embedded Adobe RGB (1998) ICC profile. It contains gradients and colour patches so curve inversions, clipping, and channel separation are easy to see. This is a bounded PNG fixture, not unbounded RAW scene data. Use **Open image…** to choose another PNG or JPEG from the GUI.
