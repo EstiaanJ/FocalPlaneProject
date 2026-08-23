@@ -463,15 +463,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "better-plots"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "image",
- "rfd",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1147,16 +1138,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "exposure-curve-tool"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "image",
- "png",
- "rfd",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1213,13 +1194,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "focal-curve"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "image",
+ "png",
+ "rfd",
+]
+
+[[package]]
 name = "focal-editor"
 version = "0.1.0"
 dependencies = [
- "better-plots",
  "eframe",
  "focal-core",
  "focal-io",
+ "focal-plot",
  "image",
  "moxcms",
  "rfd",
@@ -1235,6 +1226,16 @@ dependencies = [
  "image",
  "rawler",
  "rayon",
+]
+
+[[package]]
+name = "focal-plot"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "focal-core",
+ "image",
+ "rfd",
 ]
 
 [[package]]

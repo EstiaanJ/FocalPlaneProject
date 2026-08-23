@@ -31,13 +31,13 @@ fn main() -> eframe::Result {
     };
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Exposure Curve Tool")
+            .with_title("FocalCurve")
             .with_inner_size([1_180.0, 850.0])
             .with_min_inner_size([760.0, 650.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "Exposure Curve Tool",
+        "FocalCurve",
         native_options,
         Box::new(move |creation_context| {
             Ok(Box::new(CurveApp::new(

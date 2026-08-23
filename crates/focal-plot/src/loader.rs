@@ -14,7 +14,7 @@ use image::{
     metadata::Orientation,
 };
 
-use better_plots::vectorscope::{
+use focal_plot::vectorscope::{
     AnalysisRegion, DensityScale, SCOPE_RESOLUTION, ScopeSpace, VectorscopeAnalysis, analyse,
     analyse_region_in_space, render_reverse_highlight_with_cancellation,
 };
@@ -322,7 +322,7 @@ fn load_image(path: &Path) -> Result<LoadedImage, String> {
     let rgba = rgba.into_raw();
     let scope = analyse(&rgba, width, height, SCOPE_RESOLUTION);
     let cie_scope =
-        better_plots::vectorscope::analyse_cie1931(&rgba, width, height, SCOPE_RESOLUTION);
+        focal_plot::vectorscope::analyse_cie1931(&rgba, width, height, SCOPE_RESOLUTION);
 
     Ok(LoadedImage {
         path: path.to_owned(),
@@ -462,7 +462,7 @@ mod tests {
         with_exif.extend_from_slice(&jpeg[2..]);
 
         let path = std::env::temp_dir().join(format!(
-            "better-plots-orientation-regression-{}.jpg",
+            "focal-plot-orientation-regression-{}.jpg",
             std::process::id()
         ));
         std::fs::write(&path, with_exif).expect("write temporary JPEG fixture");
@@ -495,7 +495,7 @@ mod tests {
             .expect("encode PNG fixture");
 
         let path = std::env::temp_dir().join(format!(
-            "better-plots-png-orientation-regression-{}.png",
+            "focal-plot-png-orientation-regression-{}.png",
             std::process::id()
         ));
         std::fs::write(&path, png).expect("write temporary PNG fixture");

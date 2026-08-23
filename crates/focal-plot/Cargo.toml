@@ -1,14 +1,15 @@
 [package]
-name = "better-plots"
+name = "focal-plot"
 version = "0.1.0"
 edition = "2024"
 description = "Standalone plotting experiments for FocalPlane"
 license = "GPL-3.0-or-later"
 
 [dependencies]
-eframe = "0.35"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-rfd = "0.17"
+eframe.workspace = true
+focal-core.workspace = true
+image.workspace = true
+rfd.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

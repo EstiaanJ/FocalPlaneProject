@@ -9,12 +9,13 @@ Focal Editor is the standalone desktop editor described in `../../docs/MVP.md` a
 - Implement exposure in stops and contrast from `-100` to `+100`.
 - Keep a small input/output histogram visible.
 - Save editable state as a versioned JSON sidecar.
-- Export an 8-bit sRGB PNG or JPEG; JPEG quality is selected in the editor.
+- Export an 8-bit sRGB PNG or JPEG through one settings dialog; JPEG quality is selectable and the complete previous export settings can be reused during the session.
 - Keep the UI responsive with background loading/rendering and latest-request-wins result handling.
-- Keep the current high-level layout: Navigator at the upper left, presets below it, histograms at the top of the right rail, controls below the histograms, the photo viewer in the centre, and the filmstrip along the bottom.
+- Keep the current high-level layout: scopes and presets in the left rail, foldable controls in the right rail, the photo viewer in the centre, and the filmstrip along the bottom. Navigator is not part of the GUI.
 - Keep the loading/progress treatment in the top bar; the status remains there
-  and the `FOCALPLANE` all-caps title sits at the far right of the same top bar.
-- Make the major rails and subpanels resizable: left/right rail widths, filmstrip height, Navigator height, and histogram-panel height.
+  and the `FOCALPLANE` all-caps title sits one character space in from the
+  right edge of the same top bar.
+- Make the major rails and subpanels resizable: left/right rail widths and filmstrip height.
 
 The current MVP scope excludes the advanced curve editor and response-curve controls. Crop and FocalCore-backed scope presentation were subsequently approved and implemented in MVP Phase One; follow `../../docs/MVP.md` for the later approved scope.
 

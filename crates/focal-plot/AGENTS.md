@@ -1,8 +1,8 @@
-# Better Plots
+# FocalPlot
 
 This sub-project develops standalone plotting and image-analysis experiments before useful components move into Focal Editor or Focal Core.
 
-The canonical name is **FocalPlot** and the eventual Rust package/folder name is `focal-plot`. Keep it independently runnable as a visual test harness while designing the scopes as reusable widgets.
+Keep it independently runnable as a visual test harness while maintaining the scopes as reusable widgets.
 
 ## Engineering standard
 

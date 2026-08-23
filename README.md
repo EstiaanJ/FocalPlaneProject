@@ -20,14 +20,16 @@ FocalPlaneProject/
 ├── Cargo.toml                 # Workspace definition
 ├── README.md
 ├── crates/
-│   ├── better-plots/          # FocalPlot visual harness
+│   ├── focal-plot/            # FocalPlot visual harness and reusable scope widgets
 │   │   └── src/
-│   ├── exposure-cruve-tool/   # FocalCurve visual harness
+│   ├── focal-curve/           # FocalCurve visual harness
 │   │   ├── assets/
 │   │   └── src/
 │   ├── focal-core/            # GUI-independent production processing
 │   │   ├── src/
 │   │   └── tests/
+│   ├── focal-io/              # Shared decoding and encoding boundary
+│   │   └── src/
 │   └── focal-editor/          # Standalone desktop editor
 │       ├── examples/
 │       └── src/

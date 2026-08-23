@@ -17,8 +17,8 @@ Routine verification remains:
 
 ```sh
 cargo test -p focal-core
-cargo test -p exposure-curve-tool
-cargo test -p better-plots
+cargo test -p focal-curve
+cargo test -p focal-plot
 cargo test -p focal-editor
 ```
 
@@ -112,7 +112,7 @@ Thirty new issues were independently confirmed and corrected. Candidates 003, 01
 | FP-EDITOR-007 | High | A completion from the previous photograph could re-enable export for stale pixels. | `app::tests::opening_another_image_invalidates_in_flight_preview_and_export_state` |
 | FP-EDITOR-008 | High | Zoom enlarged a fixed proxy instead of sampling the visible full-resolution region. | `app::tests::zoom_sampling_uses_the_visible_region_and_never_exceeds_one_megapixel`; `preview::tests::preview_sampling_extracts_only_the_requested_source_region` |
 | FP-EDITOR-009 | High | Full-resolution export processing and encoding ran on the GUI thread. | `app::tests::export_requires_pixels_from_the_current_completed_render`; `image_io::tests::png_export_embeds_an_srgb_icc_profile` |
-| FP-EDITOR-010 | Medium | Focal Editor used duplicate scope analysis and could not cancel active work. | `scope::tests::submitting_a_new_scope_cancels_the_active_scan` |
+| FP-EDITOR-010 | Medium | Focal Editor used duplicate scope analysis and could not cancel active work. The reusable worker now lives in FocalPlot. | `focal-plot scope::tests::submitting_a_new_scope_cancels_the_active_scan` |
 | FP-EDITOR-011 | Medium | Orientation and ICC profiles were ignored, and 16-bit alpha was quantised before transparency detection. | `image_io::tests::png_orientation_is_applied_exactly_once_at_decode`; `image_io::tests::embedded_adobe_rgb_profile_enters_core_with_an_adobe_contract`; `image_io::tests::sixteen_bit_alpha_is_not_quantised_before_transparency_detection` |
 | FP-EDITOR-012 | Medium | Crop editing could show stale cropped pixels and export an unconfirmed crop. | `app::tests::crop_is_excluded_from_render_snapshot_until_finalised`; `preview::tests::applied_crop_sampling_maps_the_visible_crop_region_back_to_the_source` |
 | FP-EDITOR-013 | Low | Failed thumbnail requests could never retry. | `app::tests::failed_thumbnail_decode_becomes_retryable` |

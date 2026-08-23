@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/better-plots",
-    "crates/exposure-cruve-tool",
+    "crates/focal-curve",
     "crates/focal-core",
     "crates/focal-editor",
     "crates/focal-io",
+    "crates/focal-plot",
 ]
 resolver = "3"
 
@@ -21,7 +21,7 @@ eframe = { version = "0.35.0", default-features = false, features = [
 ] }
 focal-core = { path = "crates/focal-core" }
 focal-io = { path = "crates/focal-io" }
-focal-plot = { package = "better-plots", path = "crates/better-plots" }
+focal-plot = { path = "crates/focal-plot" }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff"] }
 moxcms = "0.8.1"
 png = "0.18.1"

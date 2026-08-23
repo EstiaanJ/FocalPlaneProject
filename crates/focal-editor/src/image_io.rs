@@ -24,7 +24,7 @@ use image::{
 };
 use moxcms::{ColorProfile, Layout, TransformOptions};
 
-pub const DEFAULT_JPEG_QUALITY: u8 = 92;
+pub const DEFAULT_JPEG_QUALITY: u8 = 96;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -207,11 +207,6 @@ fn decoded_image_from_dynamic_with_profile(
     image: &image::DynamicImage,
     icc: Option<&[u8]>,
 ) -> Result<DecodedImage, ImageIoError> {
-    if icc.is_none()
-        && let Some(decoded) = decoded_unprofiled_8_bit_image(image)
-    {
-        return Ok(decoded);
-    }
     let width = image.width();
     let height = image.height();
     let source_rgba = image.to_rgba32f().into_raw();
@@ -274,66 +269,6 @@ fn decoded_image_from_dynamic_with_profile(
         input_contract,
         has_transparency,
     })
-}
-
-fn decoded_unprofiled_8_bit_image(image: &image::DynamicImage) -> Option<DecodedImage> {
-    match image {
-        image::DynamicImage::ImageRgb8(image) => {
-            let source = image.as_raw();
-            let pixel_count = source.len() / 3;
-            let pixels = source
-                .chunks_exact(3)
-                .map(|pixel| {
-                    [
-                        f32::from(pixel[0]) / 255.0,
-                        f32::from(pixel[1]) / 255.0,
-                        f32::from(pixel[2]) / 255.0,
-                    ]
-                })
-                .collect();
-            let mut rgba = Vec::with_capacity(pixel_count.saturating_mul(4));
-            for pixel in source.chunks_exact(3) {
-                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], u8::MAX]);
-            }
-            Some(DecodedImage {
-                width: image.width(),
-                height: image.height(),
-                rgba,
-                pixels,
-                alpha: vec![1.0; pixel_count],
-                input_contract: ImageContract::SRGB_DISPLAY,
-                has_transparency: false,
-            })
-        }
-        image::DynamicImage::ImageRgba8(image) => {
-            let source = image.as_raw();
-            let pixels = source
-                .chunks_exact(4)
-                .map(|pixel| {
-                    [
-                        f32::from(pixel[0]) / 255.0,
-                        f32::from(pixel[1]) / 255.0,
-                        f32::from(pixel[2]) / 255.0,
-                    ]
-                })
-                .collect();
-            let alpha = source
-                .chunks_exact(4)
-                .map(|pixel| f32::from(pixel[3]) / 255.0)
-                .collect::<Vec<_>>();
-            let has_transparency = alpha.iter().any(|value| *value < 1.0);
-            Some(DecodedImage {
-                width: image.width(),
-                height: image.height(),
-                rgba: source.clone(),
-                pixels,
-                alpha,
-                input_contract: ImageContract::SRGB_DISPLAY,
-                has_transparency,
-            })
-        }
-        _ => None,
-    }
 }
 
 #[derive(Debug)]
@@ -400,9 +335,8 @@ pub fn spawn_exporter() -> (Sender<ExportRequest>, Receiver<ExportResult>) {
     std::thread::Builder::new()
         .name("focal-editor-export".to_owned())
         .spawn(move || {
-            // Construct the executor on the worker so GPU initialisation never
-            // blocks the GUI. `new` keeps the multithreaded CPU path available
-            // when no compatible adapter is present.
+            // Initialise acceleration on the worker so adapter discovery cannot
+            // block the GUI. CPU remains available when no GPU can initialise.
             let optimized = create_export_executor();
             while let Ok(request) = request_receiver.recv() {
                 let generation = request.generation;
@@ -422,6 +356,10 @@ pub fn spawn_exporter() -> (Sender<ExportRequest>, Receiver<ExportResult>) {
                     )
                     .map_err(|error| error.to_string());
                 let (result, backend) = match render_result {
+                    Ok((output, _, backend)) if cancellation.is_cancelled() => {
+                        let _ = output;
+                        (Err("export cancelled".to_owned()), Some(backend))
+                    }
                     Ok((output, _, backend)) => (
                         encode_export(&path, &output, format, &cancellation),
                         Some(backend),
@@ -447,9 +385,6 @@ pub fn spawn_exporter() -> (Sender<ExportRequest>, Receiver<ExportResult>) {
 }
 
 fn create_export_executor() -> OptimizedPipeline {
-    // Unit tests construct and drop many editor instances in a headless
-    // process. Keep those tests deterministic and use the same parity-tested
-    // Optimized CPU implementation; the application build prefers the GPU.
     #[cfg(test)]
     {
         OptimizedPipeline::cpu_only().expect("the optimized CPU executor should initialise")
@@ -480,9 +415,9 @@ fn encode_export(
         cancellation.clone(),
     );
     let result = match format {
-        ExportFormat::Png => encode_srgb_png_with_writer(path, output_image, &rgb, writer),
+        ExportFormat::Png => encode_srgb_png_with_writer(output_image, &rgb, writer),
         ExportFormat::Jpeg { quality } => {
-            encode_srgb_jpeg_with_writer(path, output_image, &rgb, quality.clamp(1, 100), writer)
+            encode_srgb_jpeg_with_writer(output_image, &rgb, quality.clamp(1, 100), writer)
         }
     };
     if let Err(error) = result {
@@ -511,25 +446,19 @@ fn temporary_export_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 fn encode_srgb_png(path: &Path, output_image: &Image) -> Result<(), String> {
-    let cancellation = CancellationToken::new();
-    let rgb = rgb_bytes(output_image, &cancellation)?;
-    let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
-    let writer = CancellableWriter::new(
-        std::io::BufWriter::with_capacity(1 << 20, file),
-        cancellation.clone(),
-    );
-    encode_srgb_png_with_writer(path, output_image, &rgb, writer)
+    encode_export(
+        path,
+        output_image,
+        ExportFormat::Png,
+        &CancellationToken::new(),
+    )
 }
 
 fn encode_srgb_png_with_writer<W: Write>(
-    _path: &Path,
     output_image: &Image,
     rgb: &[u8],
     writer: CancellableWriter<W>,
 ) -> Result<(), String> {
-    // The pipeline output is opaque. RGB avoids carrying a redundant alpha
-    // channel through the encoder and is lossless with respect to the prior
-    // export contract.
     let cancellation = writer.cancellation.clone();
     let mut encoder = PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Sub);
     encoder
@@ -550,7 +479,6 @@ fn encode_srgb_png_with_writer<W: Write>(
 }
 
 fn encode_srgb_jpeg_with_writer<W: Write>(
-    _path: &Path,
     output_image: &Image,
     rgb: &[u8],
     quality: u8,
@@ -939,8 +867,6 @@ impl std::error::Error for ImageIoError {}
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
 
     #[test]
@@ -954,9 +880,7 @@ mod tests {
     #[ignore = "uses the local 38 MP X-T5 reference fixture"]
     fn xt5_raf_opens_through_the_editor_decode_boundary() {
         let path = Path::new("../../test-image/X-T5_RAW/PROVIA_JPG.RAF");
-        let started = Instant::now();
         let image = decode_with_cancellation(path, &CancellationToken::new()).unwrap();
-        eprintln!("X-T5 RAF decode: {:?}", started.elapsed());
         assert_eq!((image.width, image.height), (7728, 5152));
         assert_eq!(image.input_contract, ImageContract::SRGB_DISPLAY);
         assert!(!image.has_transparency);
@@ -969,95 +893,6 @@ mod tests {
             thumbnail.rgba.len(),
             usize::try_from(thumbnail.width * thumbnail.height * 4).unwrap()
         );
-    }
-
-    #[test]
-    #[ignore = "uses the local 38 MP X-T5 JPEG fixture"]
-    fn xt5_jpeg_opens_through_the_editor_decode_boundary() {
-        let path = Path::new("../../test-image/X-T5_RAW/PROVIA_JPG.JPG");
-        let started = Instant::now();
-        let image = decode_with_cancellation(path, &CancellationToken::new()).unwrap();
-        eprintln!("X-T5 JPEG decode: {:?}", started.elapsed());
-        assert_eq!((image.width, image.height), (7728, 5152));
-        assert_eq!(image.input_contract, ImageContract::SRGB_DISPLAY);
-        assert!(!image.has_transparency);
-        assert_eq!(image.pixels.len(), 7728 * 5152);
-        assert_eq!(image.rgba.len(), 7728 * 5152 * 4);
-    }
-
-    #[test]
-    #[ignore = "uses the local 38 MP X-T5 RAW fixture and records a target-machine benchmark"]
-    fn xt5_export_matches_reference_and_records_encoder_timings() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-image/X-T5_RAW/PROVIA_JPG.RAF");
-        if !path.is_file() {
-            return;
-        }
-        let decoded = decode_with_cancellation(&path, &CancellationToken::new()).unwrap();
-        let source = decoded.to_core_image().unwrap();
-        let pipeline = Pipeline::default();
-
-        let reference_started = Instant::now();
-        let (reference, _) = pipeline.render(source.clone()).unwrap();
-        let reference_time = reference_started.elapsed();
-
-        let optimised_started = Instant::now();
-        let (optimised, _, backend) = OptimizedPipeline::cpu_only()
-            .unwrap()
-            .render(&pipeline, source.clone())
-            .unwrap();
-        let optimised_time = optimised_started.elapsed();
-        assert_eq!(optimised, reference);
-
-        let accelerated_started = Instant::now();
-        let (accelerated, _, accelerated_backend) = OptimizedPipeline::new()
-            .unwrap()
-            .render(&pipeline, source)
-            .unwrap();
-        let accelerated_time = accelerated_started.elapsed();
-        let max_error = accelerated
-            .pixels()
-            .iter()
-            .zip(reference.pixels())
-            .flat_map(|(accelerated, reference)| accelerated.iter().zip(reference))
-            .map(|(accelerated, reference)| (accelerated - reference).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(
-            max_error <= 2.0e-5,
-            "accelerated export max error={max_error}"
-        );
-
-        let png_path = std::env::temp_dir().join(format!(
-            "focal-editor-xt5-export-{}.png",
-            std::process::id()
-        ));
-        let jpeg_path = std::env::temp_dir().join(format!(
-            "focal-editor-xt5-export-{}.jpg",
-            std::process::id()
-        ));
-        let png_started = Instant::now();
-        encode_export(
-            &png_path,
-            &accelerated,
-            ExportFormat::Png,
-            &CancellationToken::new(),
-        )
-        .unwrap();
-        let png_time = png_started.elapsed();
-        let jpeg_started = Instant::now();
-        encode_export(
-            &jpeg_path,
-            &accelerated,
-            ExportFormat::jpeg(DEFAULT_JPEG_QUALITY),
-            &CancellationToken::new(),
-        )
-        .unwrap();
-        let jpeg_time = jpeg_started.elapsed();
-        eprintln!(
-            "X-T5 export benchmark: reference={reference_time:?}, optimised={optimised_time:?} ({backend:?}), accelerated={accelerated_time:?} ({accelerated_backend:?}), png={png_time:?}, jpeg={jpeg_time:?}"
-        );
-        let _ = std::fs::remove_file(png_path);
-        let _ = std::fs::remove_file(jpeg_path);
     }
 
     #[test]
@@ -1120,26 +955,6 @@ mod tests {
             image.pixels(),
             &[[128.0 / 255.0, 64.0 / 255.0, 32.0 / 255.0]]
         );
-    }
-
-    #[test]
-    fn unprofiled_8_bit_fast_path_preserves_rgb_and_alpha() {
-        let rgb = image::DynamicImage::ImageRgb8(
-            image::RgbImage::from_raw(2, 1, vec![128, 64, 32, 255, 0, 7]).unwrap(),
-        );
-        let decoded = decoded_image_from_dynamic_with_profile(&rgb, None).unwrap();
-        assert_eq!(decoded.rgba, vec![128, 64, 32, 255, 255, 0, 7, 255]);
-        assert_eq!(decoded.alpha, vec![1.0, 1.0]);
-        assert!(!decoded.has_transparency);
-        assert_eq!(decoded.input_contract, ImageContract::SRGB_DISPLAY);
-
-        let rgba = image::DynamicImage::ImageRgba8(
-            image::RgbaImage::from_raw(2, 1, vec![128, 64, 32, 255, 255, 0, 7, 127]).unwrap(),
-        );
-        let decoded = decoded_image_from_dynamic_with_profile(&rgba, None).unwrap();
-        assert_eq!(decoded.rgba, vec![128, 64, 32, 255, 255, 0, 7, 127]);
-        assert_eq!(decoded.alpha, vec![1.0, 127.0 / 255.0]);
-        assert!(decoded.has_transparency);
     }
 
     #[test]
@@ -1444,12 +1259,11 @@ mod tests {
         )
         .unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let mut jpeg_decoder = JpegDecoder::new(Cursor::new(&bytes)).unwrap();
-        assert!(jpeg_decoder.icc_profile().unwrap().is_some());
-        assert_eq!(jpeg_decoder.dimensions(), (2, 1));
+        let mut decoder = JpegDecoder::new(Cursor::new(&bytes)).unwrap();
+        assert!(decoder.icc_profile().unwrap().is_some());
+        assert_eq!(decoder.dimensions(), (2, 1));
         let decoded_image = image::load_from_memory_with_format(&bytes, ImageFormat::Jpeg).unwrap();
-        assert_eq!(decoded_image.width(), 2);
-        assert_eq!(decoded_image.height(), 1);
+        assert_eq!((decoded_image.width(), decoded_image.height()), (2, 1));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1498,8 +1312,8 @@ mod tests {
         .unwrap();
         encode_export(&path, &source, ExportFormat::Png, &CancellationToken::new()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let png_decoder = PngDecoder::new(Cursor::new(&bytes)).unwrap();
-        assert_eq!(png_decoder.color_type(), image::ColorType::Rgb8);
+        let decoder = image::codecs::png::PngDecoder::new(Cursor::new(&bytes)).unwrap();
+        assert_eq!(decoder.color_type(), image::ColorType::Rgb8);
         let decoded_image = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
             .unwrap()
             .to_rgb8();

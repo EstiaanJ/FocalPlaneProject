@@ -30,11 +30,15 @@ The first implementation was deliberately narrow:
 - expose exposure in stops and contrast from `-100` to `+100`;
 - show the input/output histogram;
 - save editable parameters as a versioned JSON sidecar;
-- export an 8-bit sRGB PNG.
+- export an 8-bit sRGB PNG or JPEG through one export dialog with a file-type selector and JPEG quality control;
 
 The current MVP scope excludes the advanced curve control and response-curve controls. Crop and FocalCore-backed scope analysis were subsequently approved and implemented in Phase One. These GUI scope decisions never permit a second processing pipeline.
 
-The original MVP export is an 8-bit sRGB PNG. The current editor additionally offers 8-bit sRGB JPEG export with a quality slider; PNG remains lossless. Both formats receive the same full-resolution render, and the export worker uses the Optimized executor while retaining the CPU Reference as the parity oracle.
+The export dialog can reuse the complete settings from the last successful export in the current session, including its destination path. The editor's export worker uses the Optimized executor, preferring the GPU for supported complete snapshots and otherwise using its multithreaded CPU path. The CPU Reference remains the parity oracle.
+
+The current layout places Histograms, CIE 1931, and RYB scopes in the left rail, with presets below them. The Navigator has been removed. The right rail contains foldable Crop, Display Aids, White Balance, Tone, Local Contrast, Colour, and Noise Reduction sections above the fixed processing bar.
+
+Scope analysis remains delegated to FocalCore; the reusable background scope worker and egui `ScopeWidget` are provided by the `focal-plot` crate rather than being editor-owned code.
 
 ## Standalone editor
 

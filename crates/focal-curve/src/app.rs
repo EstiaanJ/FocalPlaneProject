@@ -988,7 +988,7 @@ impl CurveApp {
         };
         let Some(path) = rfd::FileDialog::new()
             .add_filter("PNG image", &["png"])
-            .set_file_name("exposure-curve-preview.png")
+            .set_file_name("focal-curve-preview.png")
             .save_file()
         else {
             return;

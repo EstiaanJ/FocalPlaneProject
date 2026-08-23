@@ -128,7 +128,7 @@ Hotkeys `2`
 - [ ] Input: HEIC
 - [x] Input: TIFF
 - [ ] RAW support: Apple DNG
-- [ ] RAW support: Fujifilm X-T5
+- [x] RAW support: Fujifilm X-T5
 - [x] Copy and paste edits within the current editor session
 - [x] White-balance picker
 - [ ] Hotkeys beyond the loupe and existing crop shortcuts

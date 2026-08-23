@@ -12,7 +12,7 @@ tags:
 
 This is the implementation guide for consolidating the current experiments into the architecture defined by [[Architecture Decisions]]. The current Focal Editor scope is described in [[Focal Editor & Focal Core]] and [[MVP]]. Keep later GUI decisions in those product documents rather than silently expanding this migration guide.
 
-The sequence below records the migration logic and retains completed instructions for context. The known-defect corrections and first editor slice are complete. FocalCore execution, colour, curve, and numerical scope contracts are substantially implemented, as are the checked Phase One and Phase Two editor features in [[MVP]]. The `focal-io` boundary now exists with an initial X-T5 sensor decoder; migration of the existing decoded-image and export responsibilities into it remains outstanding. Canonical harness renames, permanent gamut mapping, measured 150 ms cancellation evidence, and preview/export calibration for scale-dependent modules also remain outstanding.
+The sequence below records the migration logic and retains completed instructions for context. The known-defect corrections, canonical harness renames, and first editor slice are complete. FocalCore execution, colour, curve, and numerical scope contracts are substantially implemented, as are the checked Phase One and Phase Two editor features in [[MVP]]. The `focal-io` boundary now exists with an initial X-T5 sensor decoder; migration of the existing decoded-image and export responsibilities into it remains outstanding. Permanent gamut mapping, measured 150 ms cancellation evidence, and preview/export calibration for scale-dependent modules also remain outstanding.
 
 An initial X-T5 decoder experiment was evaluated and then removed when RAW work was paused. It did not enter the production architecture. RAW research subsequently resumed using the annotated Camera-Neutral reference dataset under `test-image/X-T5_RAW`. The new `focal-io` boundary decodes and validates X-T5 mosaics through Rawler and exposes normalised scene-linear sensor samples; Camera-Neutral development remains research tooling until its colour and tone rendering passes the documented numerical and visual checks.
 
@@ -39,15 +39,15 @@ FocalCurve and FocalPlot own their egui widgets, interaction state, presentation
 
 ## Intended names
 
-The current directories retain historical names until the migration is intentionally performed:
+The canonical harness names are now active in both the filesystem and Cargo metadata:
 
 | Current | Canonical Rust/folder name | Documentation/product name |
 | --- | --- | --- |
-| `crates/exposure-cruve-tool` | `focal-curve` | FocalCurve |
-| `crates/better-plots` | `focal-plot` | FocalPlot |
+| `crates/focal-curve` | `focal-curve` | FocalCurve |
+| `crates/focal-plot` | `focal-plot` | FocalPlot |
 | `crates/focal-editor` | `apps/focal-editor` may be considered later | Focal Editor |
 
-Perform renames as their own mechanical step, update Cargo package names and every documentation link together, and run the complete workspace checks afterward. Do not mix renaming with processing changes.
+The rename was performed as a mechanical step; the reusable FocalPlot scope worker and egui widget now live in `crates/focal-plot/src/scope.rs` and `crates/focal-plot/src/scope_widget.rs` and are consumed by Focal Editor. Keep future renames similarly isolated from processing changes.
 
 ## Migration rules
 
@@ -98,7 +98,7 @@ Avoid fusing modules in the reference merely for speed. An accelerated implement
 
 ### Phase 1 — repository foundation
 
-**Status: partially complete.** Root guidance, workspace quality commands, and the shared target directory are in place. The harness renames and an automated documentation-link check remain outstanding.
+**Status: substantially complete.** Root guidance, workspace quality commands, the shared target directory, and the canonical harness names are in place. An automated documentation-link check remains outstanding.
 
 - Create the root project guidance and quality gates.
 - Rename the experimental applications in an isolated change.

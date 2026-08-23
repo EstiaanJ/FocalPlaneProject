@@ -21,9 +21,9 @@ use eframe::egui::{
     self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
 };
 use focal_core::{CancellationToken, ClippingWarnings, CropSettings, Image, PIPELINE_VERSION};
-use focal_plot::vectorscope::{
-    CIE1931_LOCUS, DensityScale, ScopeSpace, VectorscopeAnalysis, render_trace, ring_colour,
-};
+use focal_plot::scope::{self, ScopeRequest, ScopeResult};
+use focal_plot::scope_widget::ScopeWidget;
+use focal_plot::vectorscope::{DensityScale, ScopeSpace, VectorscopeAnalysis, render_trace};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -32,16 +32,21 @@ use crate::{
         LoadOperation, LoadRequest, LoadResult, Thumbnail, ThumbnailRequest, ThumbnailResult,
     },
     preview::{self, Adjustments, PreviewEvent, PreviewRequest, PreviewSampling, PreviewWorker},
-    scope::{self, ScopeRequest, ScopeResult},
 };
 
 const EDIT_STATE_VERSION: u32 = 3;
 const PREVIEW_BACKGROUND: Color32 = Color32::from_rgb(12, 13, 15);
 const PANEL_BACKGROUND: Color32 = Color32::from_rgb(24, 26, 29);
 const ACCENT: Color32 = Color32::from_rgb(117, 181, 230);
-const LEFT_RAIL_WIDTH: f32 = 190.0;
-const RIGHT_RAIL_WIDTH: f32 = 330.0;
-const FILMSTRIP_HEIGHT: f32 = 132.0;
+const LEFT_RAIL_WIDTH: f32 = 228.0;
+const RIGHT_RAIL_WIDTH: f32 = 280.0;
+const FILMSTRIP_ITEM_HEIGHT: f32 = 78.0;
+const FILMSTRIP_BOTTOM_INSET: f32 = 2.0;
+// The header row is one body-text line plus egui's default row spacing. Keep
+// the default filmstrip just tall enough for that row, the thumbnails, and
+// the fixed bottom inset.
+const FILMSTRIP_HEIGHT: f32 = 102.0;
+const FILMSTRIP_MIN_HEIGHT: f32 = FILMSTRIP_HEIGHT;
 const TOOLBAR_HEIGHT: f32 = 38.0;
 const PROCESSING_BAR_HEIGHT: f32 = 32.0;
 const PREVIEW_MAX_PIXELS: usize = 1_000_000;
@@ -127,6 +132,12 @@ struct FilmStripItem {
     thumbnail_requested: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ExportSettings {
+    path: PathBuf,
+    format: ExportFormat,
+}
+
 pub struct FocalEditorApp {
     load_sender: Sender<LoadRequest>,
     load_receiver: Receiver<LoadResult>,
@@ -199,11 +210,12 @@ pub struct FocalEditorApp {
     left_rail_width: f32,
     right_rail_width: f32,
     filmstrip_height: f32,
-    navigator_height: f32,
-    histogram_height: f32,
-    last_export_directory: Option<PathBuf>,
-    last_export_format: ExportFormat,
+    export_dialog_open: bool,
+    export_with_last: bool,
+    export_dialog_path: Option<PathBuf>,
+    export_dialog_format: ExportFormat,
     jpeg_quality: u8,
+    last_export: Option<ExportSettings>,
     status: String,
 }
 
@@ -288,11 +300,12 @@ impl FocalEditorApp {
             left_rail_width: LEFT_RAIL_WIDTH,
             right_rail_width: RIGHT_RAIL_WIDTH,
             filmstrip_height: FILMSTRIP_HEIGHT,
-            navigator_height: 170.0,
-            histogram_height: 185.0,
-            last_export_directory: None,
-            last_export_format: ExportFormat::Png,
+            export_dialog_open: false,
+            export_with_last: false,
+            export_dialog_path: None,
+            export_dialog_format: ExportFormat::Png,
             jpeg_quality: DEFAULT_JPEG_QUALITY,
+            last_export: None,
             status: "Ready — open a PNG, JPEG, TIFF, or X-T5 RAF to begin".to_owned(),
         };
 
@@ -492,9 +505,11 @@ impl FocalEditorApp {
             self.export_cancellation = None;
             match result.result {
                 Ok(()) => {
-                    self.last_export_directory =
-                        result.path.parent().map(std::path::Path::to_path_buf);
-                    self.last_export_format = result.format;
+                    self.last_export = Some(ExportSettings {
+                        path: result.path.clone(),
+                        format: result.format,
+                    });
+                    self.export_dialog_open = false;
                     let backend = result.backend.map_or("unknown", backend_label);
                     self.status = format!("Exported {} ({backend})", result.path.display());
                 }
@@ -833,74 +848,25 @@ impl FocalEditorApp {
         }
     }
 
-    fn export_png(&mut self) {
+    fn open_export_dialog(&mut self) {
         if !self.can_export() {
             self.status = "Wait for the current render before exporting".to_owned();
             return;
         }
-        let (Some(source_path), Some(_)) = (self.source_path.as_ref(), self.output.as_ref()) else {
-            self.status = "Render a preview before exporting".to_owned();
-            return;
-        };
-        let default_name = format!(
-            "{}-edited.png",
-            source_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("untitled")
-        );
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
-            .set_file_name(default_name)
-            .save_file()
-        else {
-            return;
-        };
-        self.export_to_path(&path, ExportFormat::Png);
-    }
-
-    fn export_jpeg(&mut self) {
-        if !self.can_export() {
-            self.status = "Wait for the current render before exporting".to_owned();
-            return;
-        }
-        let (Some(source_path), Some(_)) = (self.source_path.as_ref(), self.output.as_ref()) else {
-            self.status = "Render a preview before exporting".to_owned();
-            return;
-        };
-        let default_name = format!(
-            "{}-edited.jpg",
-            source_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("untitled")
-        );
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("JPEG image", &["jpg", "jpeg"])
-            .set_file_name(default_name)
-            .save_file()
-        else {
-            return;
-        };
-        self.export_to_path(&path, ExportFormat::jpeg(self.jpeg_quality));
-    }
-
-    fn export_beside_last(&mut self) {
-        let Some(directory) = self.last_export_directory.as_ref() else {
-            return;
-        };
         let Some(source_path) = self.source_path.as_ref() else {
+            self.status = "Open an image before exporting".to_owned();
             return;
         };
-        let format = match self.last_export_format {
-            ExportFormat::Png => ExportFormat::Png,
-            ExportFormat::Jpeg { .. } => ExportFormat::jpeg(self.jpeg_quality),
-        };
-        let mut path = default_export_path(directory, source_path);
-        if format != ExportFormat::Png {
-            path.set_extension(format.extension());
-        }
-        self.export_to_path(&path, format);
+        self.export_dialog_path = Some(default_export_path(
+            source_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+            source_path,
+        ));
+        self.export_dialog_format = ExportFormat::Png;
+        self.jpeg_quality = DEFAULT_JPEG_QUALITY;
+        self.export_with_last = false;
+        self.export_dialog_open = true;
     }
 
     fn export_to_path(&mut self, path: &std::path::Path, format: ExportFormat) {
@@ -935,6 +901,165 @@ impl FocalEditorApp {
             self.invalidate_export();
             self.status = "The export worker is unavailable".to_owned();
         }
+    }
+
+    fn choose_export_path(&mut self) {
+        let Some(source_path) = self.source_path.as_ref() else {
+            return;
+        };
+        let format = self.dialog_format();
+        let default_path = self.export_dialog_path.clone().unwrap_or_else(|| {
+            default_export_path(
+                source_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+                source_path,
+            )
+        });
+        let mut dialog = rfd::FileDialog::new()
+            .set_directory(
+                default_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )
+            .set_file_name(
+                default_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("edited.png"),
+            );
+        dialog = match format {
+            ExportFormat::Png => dialog.add_filter("PNG image", &["png"]),
+            ExportFormat::Jpeg { .. } => dialog.add_filter("JPEG image", &["jpg", "jpeg"]),
+        };
+        if let Some(path) = dialog.save_file() {
+            self.export_dialog_path = Some(export_path_with_format(&path, format));
+        }
+    }
+
+    fn dialog_format(&self) -> ExportFormat {
+        match self.export_dialog_format {
+            ExportFormat::Png => ExportFormat::Png,
+            ExportFormat::Jpeg { .. } => ExportFormat::jpeg(self.jpeg_quality),
+        }
+    }
+
+    fn sync_export_dialog_to_last(&mut self) {
+        if let Some(last) = self.last_export.clone() {
+            self.export_dialog_path = Some(last.path);
+            self.export_dialog_format = last.format;
+            if let ExportFormat::Jpeg { quality } = last.format {
+                self.jpeg_quality = quality;
+            }
+        }
+    }
+
+    fn submit_export_dialog(&mut self) {
+        let Some(path) = self.export_dialog_path.clone() else {
+            self.status = "Choose an export destination first".to_owned();
+            return;
+        };
+        let format = self.dialog_format();
+        self.export_to_path(&path, format);
+    }
+
+    fn show_export_dialog(&mut self, context: &egui::Context) {
+        if !self.export_dialog_open {
+            return;
+        }
+        let mut open = self.export_dialog_open;
+        egui::Window::new("Export image")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(context, |ui| {
+                let has_last = self.last_export.is_some();
+                let was_with_last = self.export_with_last;
+                ui.add_enabled_ui(has_last, |ui| {
+                    ui.checkbox(&mut self.export_with_last, "Export with last");
+                });
+                if !has_last {
+                    ui.label(
+                        egui::RichText::new("No successful export has been made this session.")
+                            .small()
+                            .weak(),
+                    );
+                } else if self.export_with_last && !was_with_last {
+                    self.sync_export_dialog_to_last();
+                }
+
+                let settings_enabled = !self.export_with_last;
+                ui.add_enabled_ui(settings_enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("File type");
+                        let previous_format = self.export_dialog_format;
+                        let selected = match self.export_dialog_format {
+                            ExportFormat::Png => "PNG",
+                            ExportFormat::Jpeg { .. } => "JPEG",
+                        };
+                        egui::ComboBox::from_id_salt("export-file-type")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.export_dialog_format,
+                                    ExportFormat::Png,
+                                    "PNG",
+                                );
+                                ui.selectable_value(
+                                    &mut self.export_dialog_format,
+                                    ExportFormat::Jpeg {
+                                        quality: self.jpeg_quality,
+                                    },
+                                    "JPEG",
+                                );
+                            });
+                        if previous_format != self.export_dialog_format
+                            && let Some(path) = self.export_dialog_path.as_mut()
+                        {
+                            path.set_extension(self.export_dialog_format.extension());
+                        }
+                    });
+                    if matches!(self.export_dialog_format, ExportFormat::Jpeg { .. }) {
+                        ui.add(
+                            egui::Slider::new(&mut self.jpeg_quality, 1..=100)
+                                .text("JPEG quality")
+                                .clamping(egui::SliderClamping::Always),
+                        );
+                    } else {
+                        ui.label("PNG remains lossless");
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(self.export_dialog_path.as_ref().map_or_else(
+                            || "No destination selected".to_owned(),
+                            |path| path.display().to_string(),
+                        ));
+                        if ui.button("Choose…").clicked() {
+                            self.choose_export_path();
+                        }
+                    });
+                });
+
+                if self.export_with_last {
+                    ui.label(
+                        egui::RichText::new("Using the previous path and file settings.")
+                            .small()
+                            .weak(),
+                    );
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.export_dialog_open = false;
+                    }
+                    if ui
+                        .add_enabled(self.can_export(), egui::Button::new("Export"))
+                        .clicked()
+                    {
+                        self.submit_export_dialog();
+                    }
+                });
+            });
+        self.export_dialog_open = open && self.export_dialog_open;
     }
 
     fn invalidate_export(&mut self) {
@@ -1000,9 +1125,10 @@ impl eframe::App for FocalEditorApp {
         let mut toolbar_ui = ui.new_child(egui::UiBuilder::new().max_rect(toolbar_rect));
         toolbar_ui.set_clip_rect(toolbar_rect);
         self.show_toolbar(&mut toolbar_ui, toolbar_rect);
-        let filmstrip_height = self
-            .filmstrip_height
-            .clamp(90.0, (ui.available_height() - 160.0).max(90.0));
+        let filmstrip_height = self.filmstrip_height.clamp(
+            FILMSTRIP_MIN_HEIGHT,
+            (ui.available_height() - 160.0).max(FILMSTRIP_MIN_HEIGHT),
+        );
         let content_height =
             (ui.available_height() - filmstrip_height - RESIZER_THICKNESS).max(100.0);
         let picked_white_balance = ui
@@ -1016,7 +1142,7 @@ impl eframe::App for FocalEditorApp {
                     ui.allocate_ui_with_layout(
                         Vec2::new(controls_width, ui.available_height()),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.show_left_panel(ui, &context),
+                        |ui| self.show_scope_panel(ui, &context),
                     );
                     let left_handle = resize_handle(ui, ResizeDirection::Horizontal);
                     if left_handle.dragged() {
@@ -1055,14 +1181,15 @@ impl eframe::App for FocalEditorApp {
         }
         let filmstrip_handle = resize_handle(ui, ResizeDirection::Vertical);
         if filmstrip_handle.dragged() {
-            self.filmstrip_height =
-                (self.filmstrip_height - filmstrip_handle.drag_delta().y).clamp(90.0, 300.0);
+            self.filmstrip_height = (self.filmstrip_height - filmstrip_handle.drag_delta().y)
+                .clamp(FILMSTRIP_MIN_HEIGHT, 300.0);
         }
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), filmstrip_height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| self.show_film_strip(ui, &context),
         );
+        self.show_export_dialog(&context);
     }
 }
 
@@ -1089,27 +1216,10 @@ impl FocalEditorApp {
         }
         if left
             .add_enabled(self.can_export(), egui::Button::new("Export"))
-            .on_hover_text("Render the current image to an 8-bit sRGB PNG")
+            .on_hover_text("Choose file type, destination, and export settings")
             .clicked()
         {
-            self.export_png();
-        }
-        if left
-            .add_enabled(self.can_export(), egui::Button::new("JPEG"))
-            .on_hover_text("Export an 8-bit sRGB JPEG using the quality slider")
-            .clicked()
-        {
-            self.export_jpeg();
-        }
-        if left
-            .add_enabled(
-                self.can_export() && self.last_export_directory.is_some(),
-                egui::Button::new("Export again"),
-            )
-            .on_hover_text("Export to the folder used by the previous export this session")
-            .clicked()
-        {
-            self.export_beside_last();
+            self.open_export_dialog();
         }
         left.add_space(12.0);
         if self.loupe_enabled {
@@ -1138,57 +1248,28 @@ impl FocalEditorApp {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         right.set_clip_rect(right_rect);
+        // Keep one character-sized breathing space between the title and the
+        // application edge while retaining the right-aligned status text.
+        right.add_space(8.0);
         right.label(egui::RichText::new("FOCALPLANE").strong());
         right.add_space(12.0);
         right.label(egui::RichText::new(&self.status).small().weak());
     }
 
-    fn show_left_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        let navigator_height = self
-            .navigator_height
-            .clamp(90.0, (ui.available_height() - 120.0).max(90.0));
-        let (rect, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), navigator_height),
+    fn show_scope_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        let available_height = ui.available_height();
+        let scope_height = (available_height - 120.0)
+            .clamp(180.0, 520.0)
+            .min(available_height);
+        ui.heading("Scopes");
+        let (scope_rect, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), scope_height.max(0.0)),
             Sense::hover(),
         );
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, CornerRadius::same(4), PREVIEW_BACKGROUND);
-        if let Some(texture) = &self.source_texture {
-            let image_rect = fit_rect(
-                rect.shrink(5.0),
-                texture.size_vec2().x / texture.size_vec2().y,
-            );
-            painter.image(
-                texture.id(),
-                image_rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        } else {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "No photo",
-                egui::FontId::proportional(12.0),
-                Color32::from_gray(140),
-            );
-        }
-        painter.rect_stroke(
-            rect,
-            CornerRadius::same(4),
-            Stroke::new(1.0, Color32::from_gray(62)),
-            StrokeKind::Inside,
-        );
-        ui.label(
-            egui::RichText::new("Zoom controls will be added later")
-                .small()
-                .weak(),
-        );
-        let navigator_handle = resize_handle(ui, ResizeDirection::Vertical);
-        if navigator_handle.dragged() {
-            self.navigator_height =
-                (self.navigator_height + navigator_handle.drag_delta().y).clamp(90.0, 420.0);
-        }
+        ui.scope_builder(egui::UiBuilder::new().max_rect(scope_rect), |ui| {
+            self.show_scopes(ui, context);
+        });
+        ui.separator();
         ui.heading("Presets");
         ui.add_space(4.0);
         if ui.selectable_label(true, "Digital Neutral").clicked() {
@@ -1209,22 +1290,10 @@ impl FocalEditorApp {
                 .small()
                 .weak(),
         );
-        ui.separator();
-        ui.heading("Export");
-        ui.add(
-            egui::Slider::new(&mut self.jpeg_quality, 1..=100)
-                .text("JPEG quality")
-                .clamping(egui::SliderClamping::Always),
-        );
-        ui.label(
-            egui::RichText::new(format!("{}% · PNG remains lossless", self.jpeg_quality))
-                .small()
-                .weak(),
-        );
     }
 
-    fn show_right_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.horizontal(|ui| {
+    fn show_scopes(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Histogram, "Histograms");
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Cie1931, "CIE 1931");
             ui.selectable_value(&mut self.scope_tab, ScopeTab::Ryb, "RYB");
@@ -1270,44 +1339,38 @@ impl FocalEditorApp {
             .weak(),
         );
         let available = ui.available_size();
-        let processing_height = available.y.min(PROCESSING_BAR_HEIGHT);
-        let scope_controls_height = (available.y - processing_height).max(0.0);
-        let (histogram_height, controls_height) = split_panel_heights(
-            scope_controls_height,
-            self.histogram_height,
-            80.0,
-            120.0,
-            RESIZER_THICKNESS,
-        );
-        self.histogram_height = histogram_height;
-        let (histogram_rect, _) =
-            ui.allocate_exact_size(Vec2::new(available.x, histogram_height), Sense::hover());
+        let (scope_rect, _) =
+            ui.allocate_exact_size(Vec2::new(available.x, available.y), Sense::hover());
         ui.scope_builder(
-            egui::UiBuilder::new().max_rect(histogram_rect),
+            egui::UiBuilder::new().max_rect(scope_rect),
             |ui| match self.scope_tab {
                 ScopeTab::Histogram => {
                     draw_histogram_pair(
                         ui,
                         self.source_histogram.as_ref(),
                         self.output_histogram.as_ref(),
-                        histogram_height,
+                        available.y,
                         self.histogram_density_scale,
                     );
                 }
                 ScopeTab::Cie1931 => {
-                    draw_scope(ui, self.cie_scope_texture.as_ref(), ScopeSpace::Cie1931);
+                    ScopeWidget::new(ScopeSpace::Cie1931, self.cie_scope_texture.as_ref()).show(ui);
                 }
                 ScopeTab::Ryb => {
-                    draw_scope(ui, self.ryb_scope_texture.as_ref(), ScopeSpace::Ryb);
+                    ScopeWidget::new(ScopeSpace::Ryb, self.ryb_scope_texture.as_ref()).show(ui);
                 }
             },
         );
-        let histogram_handle = resize_handle(ui, ResizeDirection::Vertical);
-        if histogram_handle.dragged() {
-            self.histogram_height += histogram_handle.drag_delta().y;
-        }
-        let (controls_rect, _) =
-            ui.allocate_exact_size(Vec2::new(available.x, controls_height), Sense::hover());
+    }
+
+    fn show_right_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        let available = ui.available_size();
+        let processing_height = available.y.min(PROCESSING_BAR_HEIGHT);
+        let controls_height = (available.y - processing_height).max(0.0);
+        let (controls_rect, _) = ui.allocate_exact_size(
+            Vec2::new(available.x.max(0.0), controls_height),
+            Sense::hover(),
+        );
         ui.scope_builder(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("focal-editor-controls")
@@ -1326,7 +1389,6 @@ impl FocalEditorApp {
 
     #[allow(clippy::too_many_lines)]
     fn show_crop_controls(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.label(egui::RichText::new("Crop and straighten").strong());
         ui.horizontal(|ui| {
             let label = match self.crop_mode {
                 CropMode::Inactive => "Crop",
@@ -1463,67 +1525,83 @@ impl FocalEditorApp {
         });
         ui.label(egui::RichText::new(input_label).small().weak());
         ui.add_space(8.0);
-        self.show_crop_controls(ui, context);
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Display aids").strong());
+        egui::CollapsingHeader::new("Crop and straighten")
+            .default_open(true)
+            .show(ui, |ui| self.show_crop_controls(ui, context));
+
         let mut clipping_changed = false;
-        clipping_changed |= ui
-            .checkbox(&mut self.show_highlight_clipping, "Highlight clipping")
-            .on_hover_text("Mark pixels with one or more channels at the display maximum")
-            .changed();
-        clipping_changed |= ui
-            .checkbox(&mut self.show_lowlight_clipping, "Lowlight clipping")
-            .on_hover_text("Mark pixels whose display lightness reaches black")
-            .changed();
+        egui::CollapsingHeader::new("Display Aids")
+            .default_open(true)
+            .show(ui, |ui| {
+                clipping_changed |= ui
+                    .checkbox(&mut self.show_highlight_clipping, "Highlight clipping")
+                    .on_hover_text("Mark pixels with one or more channels at the display maximum")
+                    .changed();
+                clipping_changed |= ui
+                    .checkbox(&mut self.show_lowlight_clipping, "Lowlight clipping")
+                    .on_hover_text("Mark pixels whose display lightness reaches black")
+                    .changed();
+            });
         if clipping_changed && let Some(generation) = self.output_generation {
             self.rebuild_output_texture(context, generation);
         }
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("White balance").strong());
-        if white_balance_picker_button(ui, self.white_balance_picker)
-            .on_hover_text("Sample white balance from a neutral area of the photo")
-            .clicked()
-        {
-            self.white_balance_picker = !self.white_balance_picker;
-        }
-        let warmth_changed = parameter_row(
-            ui,
-            "Warmth",
-            &mut self.warmth,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "Decoded-image blue-to-amber balance; not a Kelvin temperature",
-        );
-        let tint_changed = parameter_row(
-            ui,
-            "Tint",
-            &mut self.tint,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "Decoded-image green-to-magenta balance",
-        );
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Tone").strong());
-        let exposure_changed = parameter_row(
-            ui,
-            "Exposure",
-            &mut self.exposure_stops,
-            -8.0..=8.0,
-            0.0,
-            0.01,
-            "Stops of exposure compensation",
-        );
-        let contrast_changed = parameter_row(
-            ui,
-            "Contrast",
-            &mut self.contrast,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "Temporary FocalCore contrast control",
-        );
+
+        let mut warmth_changed = false;
+        let mut tint_changed = false;
+        egui::CollapsingHeader::new("White Balance")
+            .default_open(true)
+            .show(ui, |ui| {
+                if white_balance_picker_button(ui, self.white_balance_picker)
+                    .on_hover_text("Sample white balance from a neutral area of the photo")
+                    .clicked()
+                {
+                    self.white_balance_picker = !self.white_balance_picker;
+                }
+                warmth_changed = parameter_row(
+                    ui,
+                    "Warmth",
+                    &mut self.warmth,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Decoded-image blue-to-amber balance; not a Kelvin temperature",
+                );
+                tint_changed = parameter_row(
+                    ui,
+                    "Tint",
+                    &mut self.tint,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Decoded-image green-to-magenta balance",
+                );
+            });
+
+        let mut exposure_changed = false;
+        let mut contrast_changed = false;
+        egui::CollapsingHeader::new("Tone")
+            .default_open(true)
+            .show(ui, |ui| {
+                exposure_changed = parameter_row(
+                    ui,
+                    "Exposure",
+                    &mut self.exposure_stops,
+                    -8.0..=8.0,
+                    0.0,
+                    0.01,
+                    "Stops of exposure compensation",
+                );
+                contrast_changed = parameter_row(
+                    ui,
+                    "Contrast",
+                    &mut self.contrast,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Temporary FocalCore contrast control",
+                );
+            });
+
         let mut local_contrast_changed = false;
         let mut local_radius_changed = false;
         egui::CollapsingHeader::new("Local Contrast")
@@ -1548,35 +1626,46 @@ impl FocalEditorApp {
                     "Lightness-detail radius in preview pixels",
                 );
             });
-        let saturation_changed = parameter_row(
-            ui,
-            "Saturation",
-            &mut self.saturation,
-            -100.0..=100.0,
-            0.0,
-            0.1,
-            "HSV saturation with highlight and highly saturated colour protection",
-        );
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Noise reduction").strong());
-        let noise_luminance_changed = parameter_row(
-            ui,
-            "Luminance",
-            &mut self.noise_luminance,
-            0.0..=100.0,
-            0.0,
-            0.1,
-            "Edge-aware smoothing of decoded-image brightness noise",
-        );
-        let noise_colour_changed = parameter_row(
-            ui,
-            "Colour",
-            &mut self.noise_colour,
-            0.0..=100.0,
-            0.0,
-            0.1,
-            "Edge-aware smoothing of decoded-image colour noise",
-        );
+
+        let mut saturation_changed = false;
+        egui::CollapsingHeader::new("Colour")
+            .default_open(true)
+            .show(ui, |ui| {
+                saturation_changed = parameter_row(
+                    ui,
+                    "Saturation",
+                    &mut self.saturation,
+                    -100.0..=100.0,
+                    0.0,
+                    0.1,
+                    "HSV saturation with highlight and highly saturated colour protection",
+                );
+            });
+
+        let mut noise_luminance_changed = false;
+        let mut noise_colour_changed = false;
+        egui::CollapsingHeader::new("Noise Reduction")
+            .default_open(true)
+            .show(ui, |ui| {
+                noise_luminance_changed = parameter_row(
+                    ui,
+                    "Luminance",
+                    &mut self.noise_luminance,
+                    0.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Edge-aware smoothing of decoded-image brightness noise",
+                );
+                noise_colour_changed = parameter_row(
+                    ui,
+                    "Colour",
+                    &mut self.noise_colour,
+                    0.0..=100.0,
+                    0.0,
+                    0.1,
+                    "Edge-aware smoothing of decoded-image colour noise",
+                );
+            });
         if warmth_changed
             || tint_changed
             || exposure_changed
@@ -1603,9 +1692,11 @@ impl FocalEditorApp {
         let has_image = self.source.is_some();
         let has_copied_edits = self.copied_edits.is_some();
         let mut visible_indices = Vec::new();
+        let scroll_height = (ui.available_height() - FILMSTRIP_BOTTOM_INSET).max(0.0);
         egui::ScrollArea::horizontal()
             .id_salt("focal-editor-film-strip")
             .auto_shrink([false, false])
+            .max_height(scroll_height)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for index in 0..self.film_strip.len() {
@@ -2219,98 +2310,7 @@ fn draw_histogram_pair(
     }
 }
 
-fn draw_scope(ui: &mut egui::Ui, texture: Option<&TextureHandle>, space: ScopeSpace) {
-    const RING_SEGMENTS: usize = 180;
-    let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
-    let side = rect.width().min(rect.height());
-    let plot = Rect::from_center_size(rect.center(), Vec2::splat(side));
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(plot, CornerRadius::ZERO, Color32::from_rgb(3, 4, 5));
-
-    match space {
-        ScopeSpace::Cie1931 => {
-            for step in 1..8 {
-                let fraction = step as f32 / 8.0;
-                let colour = Color32::from_rgba_premultiplied(110, 118, 124, 48);
-                painter.line_segment(
-                    [
-                        Pos2::new(plot.left() + plot.width() * fraction, plot.top()),
-                        Pos2::new(plot.left() + plot.width() * fraction, plot.bottom()),
-                    ],
-                    Stroke::new(1.0, colour),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(plot.left(), plot.top() + plot.height() * fraction),
-                        Pos2::new(plot.right(), plot.top() + plot.height() * fraction),
-                    ],
-                    Stroke::new(1.0, colour),
-                );
-            }
-            let to_screen = |point: [f32; 2]| {
-                Pos2::new(
-                    plot.left() + point[0] / 0.8 * plot.width(),
-                    plot.bottom() - point[1] / 0.9 * plot.height(),
-                )
-            };
-            for (index, segment) in CIE1931_LOCUS.windows(2).enumerate() {
-                let hue = index as f32 / (CIE1931_LOCUS.len() - 1) as f32;
-                painter.line_segment(
-                    [to_screen(segment[0]), to_screen(segment[1])],
-                    Stroke::new(1.2, ring_colour(hue).gamma_multiply(0.78)),
-                );
-            }
-            painter.line_segment(
-                [
-                    to_screen(*CIE1931_LOCUS.last().unwrap_or(&CIE1931_LOCUS[0])),
-                    to_screen(CIE1931_LOCUS[0]),
-                ],
-                Stroke::new(1.2, Color32::from_rgb(220, 145, 215)),
-            );
-        }
-        ScopeSpace::Ryb => {
-            let centre = plot.center();
-            let radius = side * 0.48;
-            for fraction in [0.33_f32, 0.66, 1.0] {
-                painter.circle_stroke(
-                    centre,
-                    radius * fraction,
-                    Stroke::new(1.0, Color32::from_gray(70)),
-                );
-            }
-            for index in 0..RING_SEGMENTS {
-                let a = index as f32 / RING_SEGMENTS as f32;
-                let b = (index + 1) as f32 / RING_SEGMENTS as f32;
-                let angle_a = -std::f32::consts::FRAC_PI_2 - std::f32::consts::TAU * a;
-                let angle_b = -std::f32::consts::FRAC_PI_2 - std::f32::consts::TAU * b;
-                painter.line_segment(
-                    [
-                        centre + Vec2::angled(angle_a) * radius,
-                        centre + Vec2::angled(angle_b) * radius,
-                    ],
-                    Stroke::new(1.2, ring_colour((a + b) * 0.5).gamma_multiply(0.72)),
-                );
-            }
-        }
-    }
-    if let Some(texture) = texture {
-        painter.image(
-            texture.id(),
-            plot,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
-    } else {
-        painter.text(
-            plot.center(),
-            egui::Align2::CENTER_CENTER,
-            "Scope updates after the preview",
-            egui::FontId::proportional(12.0),
-            Color32::from_gray(130),
-        );
-    }
-}
-
+#[cfg(test)]
 fn split_panel_heights(
     available: f32,
     desired_top: f32,
@@ -2335,10 +2335,13 @@ fn show_processing_bar(
     exporting: bool,
     progress: f32,
 ) {
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), height.max(0.0)),
-        Sense::hover(),
-    );
+    // A child UI can report its unconstrained layout width even when the
+    // parent is clipped. Intersect the allocation with the visible clip rect
+    // before placing the bar so its right edge cannot escape the application.
+    let available = ui.available_rect_before_wrap();
+    let right = available.right().min(ui.clip_rect().right());
+    let width = (right - available.left()).max(0.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height.max(0.0)), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::ZERO, PANEL_BACKGROUND);
     if height < 1.0 {
@@ -2346,15 +2349,19 @@ fn show_processing_bar(
     }
     let (fraction, label) = processing_bar_state(loading, rendering, exporting, progress);
     let colour = processing_bar_colour(loading, rendering || exporting);
-    let bar_rect = rect.shrink2(Vec2::new(8.0, 10.0));
+    let bar_rect = Rect::from_min_size(
+        rect.min + Vec2::new(8.0, 10.0),
+        Vec2::new(
+            (rect.width() - 16.0).max(0.0),
+            (rect.height() - 20.0).max(0.0),
+        ),
+    );
     let bar = egui::ProgressBar::new(fraction)
         .desired_width(bar_rect.width())
         .fill(colour)
         .text(label)
         .animate(fraction < 1.0);
-    ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
-        ui.add(bar);
-    });
+    ui.put(bar_rect, bar);
 }
 
 fn processing_bar_state(
@@ -2437,7 +2444,7 @@ const fn background_work_needs_repaint(
 }
 
 fn film_strip_item(ui: &mut egui::Ui, item: &FilmStripItem, selected: bool) -> egui::Response {
-    let desired_size = Vec2::new(112.0, 78.0);
+    let desired_size = Vec2::new(112.0, FILMSTRIP_ITEM_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
     let stroke = if selected {
         Stroke::new(2.0, ACCENT)
@@ -4090,7 +4097,7 @@ mod tests {
     }
 
     #[test]
-    fn repeat_export_uses_the_last_directory_and_current_source_name() {
+    fn export_defaults_and_format_extensions_are_stable() {
         assert_eq!(
             default_export_path(
                 std::path::Path::new("/exports"),
@@ -4098,24 +4105,44 @@ mod tests {
             ),
             PathBuf::from("/exports/frame-edited.png")
         );
+        assert_eq!(
+            export_path_with_format(
+                std::path::Path::new("/exports/frame-edited.png"),
+                ExportFormat::jpeg(88),
+            ),
+            PathBuf::from("/exports/frame-edited.jpg")
+        );
+        assert_eq!(
+            export_path_with_format(
+                std::path::Path::new("/exports/frame-edited.jpg"),
+                ExportFormat::Png,
+            ),
+            PathBuf::from("/exports/frame-edited.png")
+        );
     }
 
     #[test]
-    fn export_path_uses_the_selected_format_extension() {
+    fn export_with_last_copies_the_complete_previous_settings() {
+        let context = egui::Context::default();
+        let mut app = FocalEditorApp::new(&context);
+        let previous = ExportSettings {
+            path: PathBuf::from("/exports/previous.jpg"),
+            format: ExportFormat::jpeg(81),
+        };
+        app.last_export = Some(previous.clone());
+        app.export_dialog_path = Some(PathBuf::from("/exports/current.png"));
+        app.export_dialog_format = ExportFormat::Png;
+        app.jpeg_quality = DEFAULT_JPEG_QUALITY;
+
+        app.sync_export_dialog_to_last();
+
         assert_eq!(
-            export_path_with_format(
-                std::path::Path::new("/exports/frame.png"),
-                ExportFormat::jpeg(88),
-            ),
-            PathBuf::from("/exports/frame.jpg")
+            app.export_dialog_path,
+            Some(previous.path),
+            "the previous destination must be reused exactly"
         );
-        assert_eq!(
-            export_path_with_format(
-                std::path::Path::new("/exports/frame.jpg"),
-                ExportFormat::Png,
-            ),
-            PathBuf::from("/exports/frame.png")
-        );
+        assert_eq!(app.export_dialog_format, previous.format);
+        assert_eq!(app.jpeg_quality, 81);
     }
 
     #[test]
