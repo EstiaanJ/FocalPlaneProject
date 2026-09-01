@@ -47,7 +47,7 @@ pub fn decode_xt5_thumbnail(
 
 /// Version of the initial X-T5 Camera-Neutral rendering fitted to the supplied
 /// firmware-4.00 Standard JPEG reference.
-pub const XT5_CAMERA_NEUTRAL_VERSION: u32 = 3;
+pub const XT5_CAMERA_NEUTRAL_VERSION: u32 = 4;
 
 const SRGB_LUT_SIZE: usize = 16_384;
 const SRGB_LUT_MAX: f32 = 4.0;
@@ -145,11 +145,14 @@ pub fn decode_xt5_camera_neutral(
             let sensor_x = crop_area.p.x + output_x;
             let sensor_y = crop_area.p.y + output_y;
             let pixel = demosaic_xtrans_pixel(&mosaic, raw.width, sensor_x, sensor_y, &kernels);
-            let camera = [
-                pixel[0] * white_balance[0],
-                pixel[1] * white_balance[1],
-                pixel[2] * white_balance[2],
-            ];
+            let camera = recover_clipped_neutral_highlight(
+                pixel,
+                [
+                    pixel[0] * white_balance[0],
+                    pixel[1] * white_balance[1],
+                    pixel[2] * white_balance[2],
+                ],
+            );
             let rendered = camera_neutral_v3(camera_neutral_v2(
                 [
                     camera_to_rgb[0][0] * camera[0]
@@ -182,6 +185,16 @@ pub fn decode_xt5_camera_neutral(
         rgba,
         rendering_version: XT5_CAMERA_NEUTRAL_VERSION,
     })
+}
+
+fn recover_clipped_neutral_highlight(sensor: [f32; 3], camera: [f32; 3]) -> [f32; 3] {
+    const RECOVERY_START: f32 = 0.95;
+
+    let sensor_peak = sensor.into_iter().fold(0.0_f32, f32::max);
+    let blend = ((sensor_peak - RECOVERY_START) / (1.0 - RECOVERY_START)).clamp(0.0, 1.0);
+    let blend = blend * blend * (3.0 - 2.0 * blend);
+    let neutral = camera.into_iter().fold(0.0_f32, f32::max);
+    camera.map(|channel| channel + blend * (neutral - channel))
 }
 
 fn srgb_encode(value: f32) -> f32 {
@@ -293,7 +306,16 @@ fn camera_neutral_v3([r, g, b]: [f32; 3]) -> [f32; 3] {
             *channel += feature * coefficient;
         }
     }
-    output.map(|value| value.clamp(0.0, 1.0))
+    preserve_highlight_colour([r, g, b], output.map(|value| value.clamp(0.0, 1.0)))
+}
+
+fn preserve_highlight_colour(input: [f32; 3], fitted: [f32; 3]) -> [f32; 3] {
+    const START: f32 = 0.85;
+
+    let highlight_level = input.into_iter().fold(0.0_f32, f32::max);
+    let blend = ((highlight_level - START) / (1.0 - START)).clamp(0.0, 1.0);
+    let blend = blend * blend * (3.0 - 2.0 * blend);
+    std::array::from_fn(|channel| fitted[channel] + blend * (input[channel] - fitted[channel]))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -624,6 +646,59 @@ mod tests {
                     .all(|value| (0.0..=1.0).contains(&value))
             );
         }
+    }
+
+    #[test]
+    fn camera_neutral_v3_preserves_neutral_clipped_highlights() {
+        let v2_white = camera_neutral_v2([1.0; 3]);
+        assert!(
+            v2_white
+                .into_iter()
+                .all(|channel| (channel - 1.0).abs() < f32::EPSILON)
+        );
+        assert!(
+            camera_neutral_v3(v2_white)
+                .into_iter()
+                .all(|channel| (channel - 1.0).abs() < f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn camera_neutral_v3_does_not_turn_near_white_cyan() {
+        let highlight = camera_neutral_v3([1.0, 0.999, 1.0]);
+        let minimum = highlight.into_iter().fold(f32::INFINITY, f32::min);
+        let maximum = highlight.into_iter().fold(f32::NEG_INFINITY, f32::max);
+        assert!(minimum > 0.99);
+        assert!(maximum - minimum < 0.01);
+    }
+
+    #[test]
+    fn camera_neutral_v3_does_not_rotate_bright_yellow_towards_cyan() {
+        let input = [1.0, 0.7, 0.1];
+        let preserved = preserve_highlight_colour(input, [0.0, 0.8, 0.8]);
+        assert!(
+            preserved
+                .into_iter()
+                .zip(input)
+                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn sensor_clipping_is_neutralised_before_the_colour_matrix() {
+        let recovered = recover_clipped_neutral_highlight([0.45, 1.0, 0.4], [0.9, 1.0, 0.82]);
+        assert!(
+            recovered
+                .into_iter()
+                .all(|channel| (channel - 1.0).abs() < f32::EPSILON)
+        );
+        let unclipped = recover_clipped_neutral_highlight([0.45, 0.95, 0.4], [0.9, 0.99, 0.82]);
+        assert!(
+            unclipped
+                .into_iter()
+                .zip([0.9, 0.99, 0.82])
+                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
     }
 
     #[test]

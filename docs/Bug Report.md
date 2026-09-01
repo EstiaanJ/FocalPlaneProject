@@ -132,3 +132,9 @@ The Phase Two implementation was reviewed against [[Testing#Feature review check
 | FP-EDITOR-018 | Medium | Image and thumbnail workers had stale-result rejection but no cancellation owner, allowing obsolete TIFF work to continue without a cooperative stop signal. | Load and thumbnail requests now carry cancellation tokens and check them at decode boundaries; `image_io::tests::cancelled_image_boundaries_stop_before_decode_or_flattening` covers the contract. |
 
 The same review added boundary coverage for TIFF orientation, embedded ICC, 16-bit precision, and transparency in `image_io::tests::tiff_orientation_is_applied_exactly_once_at_decode`, `image_io::tests::tiff_embedded_icc_profile_enters_the_canonical_adobe_boundary`, and `image_io::tests::tiff_decode_preserves_sixteen_bit_precision_and_transparency`.
+
+## 2026-08-24 RAW highlight correction
+
+| ID | Severity | Defect | Correction and active regression test |
+| --- | --- | --- | --- |
+| FP-IO-001 | High | The RAW path had no sensor-clipping reconstruction, and the unconstrained Camera-Neutral v3 residual fit could remap bright neutral and yellow input to green/cyan. | Camera-Neutral v4 reconstructs clipped sensor highlights before the colour matrix and fades the single-scene residual fit out as any display channel approaches its upper boundary; `raw::tests::sensor_clipping_is_neutralised_before_the_colour_matrix`, `raw::tests::camera_neutral_v3_does_not_turn_near_white_cyan`, `raw::tests::camera_neutral_v3_does_not_rotate_bright_yellow_towards_cyan`, and `raw::tests::camera_neutral_v3_preserves_neutral_clipped_highlights` cover the numerical regressions. The supplied `08JP3331.RAF` light fixture and its embedded JPEG are the retained human visual comparison. |
