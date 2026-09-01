@@ -10,6 +10,20 @@ Start with [`docs/README.md`](docs/README.md), then read:
 - [`docs/Engineering Principles.md`](docs/Engineering%20Principles.md) — quality and human-decision rules;
 - [`docs/Bug Report.md`](docs/Bug%20Report.md) — confirmed defects and regression tests.
 
+## Build from source
+
+Install the stable [Rust toolchain](https://www.rust-lang.org/tools/install), then run these commands from the repository root:
+
+```sh
+cargo build --workspace --release
+```
+
+The standalone editor is written to `target/release/focal-editor`. To build and run it directly with an image:
+
+```sh
+cargo run --release -p focal-editor -- path/to/photo.jpg
+```
+
 ## Current folder structure
 
 The working project structure is summarised below. Generated `target/` directories, local tool metadata, and most individual documentation and fixture files are omitted.
